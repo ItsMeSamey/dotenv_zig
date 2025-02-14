@@ -3,71 +3,108 @@
 const std = @import("std");
 
 pub const UnescapeStringOptions = struct {
-  logFn: fn (comptime format: []const u8, args: anytype) void = struct {
-    fn logFn(comptime format: []const u8, args: anytype) void {
+  // Which logging function to use when priniting errors, this is not used 
+  log_fn: fn (comptime format: []const u8, args: anytype) void = struct {
+    fn log_fn(comptime format: []const u8, args: anytype) void {
       if (@inComptime()) {
         @compileError(std.fmt.comptimePrint(format, args));
       } else {
         std.log.err(format, args);
       }
     }
-  }.logFn,
+  }.log_fn,
+
+  /// Whether or not to unescape and unquoted the quoted strings
+  unquote_values: bool = true,
+
+  /// Skips unquoting stings if they are invalid instead of erroring
+  /// NOTE: this is potentially dangerous
+  skip_invalid_strings: bool = false,
+
+  /// Whether or not to trim whitespace,
+  /// if this is `.yes`, whitespace outside of quotes will always be trimmed
+  /// if this is `.quoted`, whitespace will be trimmed only if the string is quoted, (this works even if unquoting strings is disabled)
+  /// if this is `.unquoted`, whitespace will be trimmed only if the string is unquoted (this works even if unquoting strings is disabled)
+  /// if this is `.no`, whitespace will never be trimmed, if the string is quoted, it will be appended to start and end after unescaping
+  trim_whitespace: enum {no, quoted, unquoted, yes} = .yes,
 
   // Whether or not to trim whitespace after unescaping the string
-  trimWhitespaceInsideQuotes: bool = true
+  trim_whitespace_inside_quotes: bool = true
 };
 
 /// Function used to unescape quoted string and trim any whitespace
 pub fn unescapeString(result: []u8, input: []const u8, comptime options: UnescapeStringOptions) ![]const u8 {
   const val = std.mem.trim(u8, input, " \t");
-  if (val.len == 0) return val;
-  if (val[0] != '"' and val[0] != '\'' and val[0] != '`') return val;
+  if (val.len == 0 or (val[0] != '"' and val[0] != '\'' and val[0] != '`')) return switch (options.trim_whitespace) {
+    .no, .quoted => input,
+    .unquoted, .yes => val,
+  };
+
+  if (!options.unquote_values) return switch (options.trim_whitespace) {
+    .no, .unquoted => input,
+    .quoted, .yes => val,
+  };
 
   // String must start and end with same kind of quotes
   if (val[0] != val[val.len - 1]) {
-    options.logFn("Invalid string --> {s} <--. if it starts with a quote, it must end with the same kind of quote too", .{val});
+    options.log_fn("Invalid string --> {s} <--. if it starts with a quote, it must end with the same kind of quote too", .{val});
     return error.InvalidString;
   }
 
+  var stripped_val = if (options.trim_whitespace_inside_quotes) std.mem.trim(u8, val[1..val.len - 1], " \t") else val[1..val.len - 1];
+
   switch (val[0]) {
-    inline '"', '\'', '`' => |escapeChar| {
-      var strippedVal = val[1..val.len - 1];
-      if (options.trimWhitespaceInsideQuotes) strippedVal = std.mem.trim(strippedVal);
+    inline '"', '\'', '`' => |escape_char| {
       var idx: usize = 0;
-      var resultIdx: usize = 0;
-      while (idx < strippedVal.len - 1) {
-        if (strippedVal[idx] == escapeChar) {
-          options.logFn("Invalid escape sequence {s} in --> {s} <--", .{ strippedVal[idx .. idx + 1], val });
+      var result_idx: usize = 0;
+      if (options.trim_whitespace == .no or options.trim_whitespace == .unquoted) {
+        while (input[result_idx] != escape_char) {
+          result[result_idx] = input[result_idx];
+          result_idx += 1;
+        }
+      }
+      while (idx < stripped_val.len - 1) {
+        if (stripped_val[idx] == escape_char) {
+          options.log_fn("Invalid escape sequence {s} in --> {s} <--", .{ stripped_val[idx .. idx + 1], val });
           return error.InvalidString;
-        } else if (strippedVal[idx] == '\\') {
-          switch (strippedVal[idx + 1]) {
-            'n' => result[resultIdx] = '\n',
-            'r' => result[resultIdx] = '\r',
-            't' => result[resultIdx] = '\t',
-            '\\' => result[resultIdx] = '\\',
-            escapeChar => result[resultIdx] = escapeChar,
+        } else if (stripped_val[idx] == '\\') {
+          switch (stripped_val[idx + 1]) {
+            'n' => result[result_idx] = '\n',
+            'r' => result[result_idx] = '\r',
+            't' => result[result_idx] = '\t',
+            '\\' => result[result_idx] = '\\',
+            escape_char => result[result_idx] = escape_char,
             else => {
-              options.logFn("Unexpected escape sequence {s} in --> {s} <--", .{ strippedVal[idx .. idx + 1], val });
+              options.log_fn("Unexpected escape sequence {s} in --> {s} <--", .{ stripped_val[idx .. idx + 1], val });
               return error.InvalidEscapeSequence;
             },
           }
           idx += 2;
         } else {
-          result[resultIdx] = strippedVal[idx];
+          result[result_idx] = stripped_val[idx];
           idx += 1;
         }
-        resultIdx += 1;
+        result_idx += 1;
       }
 
-      if (idx == strippedVal.len - 1) {
-        if (strippedVal[idx] == '\\' or strippedVal[idx] == escapeChar) {
-          options.logFn("Invalid terminal character {s} in --> {s} <--, string cant end with {s}", .{ strippedVal[idx .. idx + 1], val, if (strippedVal[idx] == '\\') "a \\ (backslash)" else "a the quote (" ++ [_]u8{escapeChar} ++ ")" });
+      if (idx == stripped_val.len - 1) {
+        if (stripped_val[idx] == '\\' or stripped_val[idx] == escape_char) {
+          options.log_fn("Invalid terminal character {s} in --> {s} <--, string cant end with {s}", .{ stripped_val[idx .. idx + 1], val, if (stripped_val[idx] == '\\') "a \\ (backslash)" else "a the quote (" ++ [_]u8{escape_char} ++ ")" });
           return error.InvalidString;
         }
-        result[resultIdx] = strippedVal[idx];
-        resultIdx += 1;
+        result[result_idx] = stripped_val[idx];
+        result_idx += 1;
       }
-      return result[0..resultIdx];
+
+      if (options.trim_whitespace == .no or options.trim_whitespace == .unquoted) {
+        var input_idx: usize = input.len - 1;
+        while (input[input_idx] != escape_char) {
+          result[result_idx] = input[input_idx];
+          input_idx -= 1;
+          result_idx += 1;
+        }
+      }
+      return result[0..result_idx];
     },
     else => unreachable,
   }
@@ -76,28 +113,119 @@ pub fn unescapeString(result: []u8, input: []const u8, comptime options: Unescap
 
 test unescapeString {
   var buffer: [100]u8 = undefined;
-  const testCases = [_][2][]const u8{
-    .{" \\ ", " \\ "},
-    .{" \\ ", "\" \\\\ \""},
-    .{" \\ ", "' \\\\ '"},
-    .{" \\ ", "` \\\\ `"},
-    .{" \\n ", " \\n "},
-    .{" \\r ", " \\r "},
-    .{" \\t ", " \\t "},
-    .{" \\\\ ", " \\\\ "},
-    .{" \n ", "' \\n '"},
-    .{" \r ", "' \\r '"},
-    .{" \t ", "' \\t '"},
-    .{" \\ ", "' \\\\ '"},
-    .{" '` ", "\" '` \""},
-    .{" `\" ", "' `\" '"},
-    .{" '\" ", "` '\" `"},
-    .{" '\\' ", "` '\\\\' `"},
+
+  for ([_][2][]const u8{
+    .{"a", " a "},
+    .{"a", " `a` "},
+    .{"a", "` a `"},
+    .{"a", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .yes,
+      .trim_whitespace_inside_quotes = true,
+    }));
+  }
+  for ([_][2][]const u8{
+    .{"a", " a "},
+    .{"a", " `a` "},
+    .{" a ", "` a `"},
+    .{" a ", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .yes,
+      .trim_whitespace_inside_quotes = false,
+    }));
+  }
+
+  for ([_][2][]const u8{
+    .{" a ", " a "},
+    .{"a", " `a` "},
+    .{"a", "` a `"},
+    .{"a", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .quoted,
+      .trim_whitespace_inside_quotes = true,
+    }));
+  }
+  for ([_][2][]const u8{
+    .{" a ", " a "},
+    .{"a", " `a` "},
+    .{" a ", "` a `"},
+    .{" a ", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .quoted,
+      .trim_whitespace_inside_quotes = false,
+    }));
+  }
+
+  for ([_][2][]const u8{
+    .{"a", " a "},
+    .{" a ", " `a` "},
+    .{"a", "` a `"},
+    .{" a ", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .unquoted,
+      .trim_whitespace_inside_quotes = true,
+    }));
+  }
+  for ([_][2][]const u8{
+    .{"a", " a "},
+    .{" a ", " `a` "},
+    .{" a ", "` a `"},
+    .{"  a  ", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .unquoted,
+      .trim_whitespace_inside_quotes = false,
+    }));
+  }
+
+  for ([_][2][]const u8{
+    .{" a ", " a "},
+    .{" a ", " `a` "},
+    .{"a", "` a `"},
+    .{" a ", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .no,
+      .trim_whitespace_inside_quotes = true,
+    }));
+  }
+  for ([_][2][]const u8{
+    .{" a ", " a "},
+    .{" a ", " `a` "},
+    .{" a ", "` a `"},
+    .{"  a  ", " ` a ` "},
+  }) |testCase| {
+    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
+      .trim_whitespace = .no,
+      .trim_whitespace_inside_quotes = false,
+    }));
+  }
+
+  for ([_][2][]const u8{
+    .{"\\", " \\ "},
+    .{"\\", "\" \\\\ \""},
+    .{"\\", "' \\\\ '"},
+    .{"\\", "` \\\\ `"},
+    .{"\\n", " \\n "},
+    .{"\\r", " \\r "},
+    .{"\\t", " \\t "},
+    .{"\\\\", " \\\\ "},
+    .{"\n", "' \\n '"},
+    .{"\r", "' \\r '"},
+    .{"\t", "' \\t '"},
+    .{"\\", "' \\\\ '"},
+    .{"'`", "\" '` \""},
+    .{"`\"", "' `\" '"},
+    .{"'\"", "` '\" `"},
+    .{"'\\'", "` '\\\\' `"},
     .{"\\", " '\\\\' "},
     .{"\\", "'\\\\'"},
-  };
-
-  for (testCases) |testCase| {
+  }) |testCase| {
     try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{}));
   }
 }
@@ -109,27 +237,27 @@ pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: Une
     @setEvalBranchQuota(10_000);
 
     const Kvp = struct { @"0": []const u8, @"1": []const u8 };
-    var kvpList: []const Kvp = &.{};
+    var kvp_list: []const Kvp = &.{};
 
     var it = std.mem.tokenizeAny(u8, file_data, "\r\n");
-    while (it.next()) |rawLine| {
-      const line = std.mem.trim(u8, rawLine, " \t");
+    while (it.next()) |raw_line| {
+      const line = std.mem.trim(u8, raw_line, " \t");
       if (line.len == 0 or line[0] == '#') continue;
 
       const i = std.mem.indexOfScalar(u8, line, '=') orelse continue;
       const key = std.mem.trim(u8, line[0..i], " ");
 
-      const tempVal = line[i+1 ..];
-      var dataArr: [tempVal.len]u8 = undefined;
-      const val = unescapeString(dataArr[0..], tempVal, options) catch |e| { @compileError(@errorName(e)); };
-      @compileLog("parsed `" ++ tempVal ++ "` to `" ++ val ++ "`");
+      const temp_val = line[i+1 ..];
+      var data_arr: [temp_val.len]u8 = undefined;
+      const val = unescapeString(data_arr[0..], temp_val, options) catch |e| { @compileError(@errorName(e)); };
 
       if (key.len == 0 or val.len == 0) continue;
+      const copy: [val.len]u8 = val[0..val.len].*;
 
-      kvpList = kvpList ++ [1]Kvp{ .{ .@"0" = key, .@"1" = val } };
+      kvp_list = kvp_list ++ [1]Kvp{ .{ .@"0" = key, .@"1" = copy[0..] } };
     }
 
-    return std.StaticStringMap([]const u8).initComptime(kvpList);
+    return std.StaticStringMap([]const u8).initComptime(kvp_list);
   }
 }
 
@@ -143,14 +271,12 @@ test loadEnvDataComptime {
   ;
 
   const parsed = comptime loadEnvDataComptime(env_file, .{});
-  comptime {
-    std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
-    std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
-    std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
-    std.debug.assert(null == parsed.get("4"));
-    std.debug.assert(null == parsed.get("5"));
-    std.debug.assert(3 == parsed.kvs.len);
-  }
+  std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
+  std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
+  std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
+  std.debug.assert(null == parsed.get("4"));
+  std.debug.assert(null == parsed.get("5"));
+  std.debug.assert(3 == parsed.kvs.len);
 }
 
 pub fn loadEnvComptime(comptime file_name: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
@@ -181,15 +307,15 @@ pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options
   };
 
   var it = std.mem.tokenizeAny(u8, file_data, "\r\n");
-  while (it.next()) |rawLine| {
-    const line = std.mem.trim(u8, rawLine, " \t");
+  while (it.next()) |raw_line| {
+    const line = std.mem.trim(u8, raw_line, " \t");
     if (line.len == 0 or line[0] == '#') continue;
 
     const i = std.mem.indexOfScalar(u8, line, '=') orelse continue;
     const key = std.mem.trim(u8, line[0..i], " ");
 
-    const tempVal = line[i+1 ..];
-    const val = unescapeString(tempVal, tempVal, options) catch |e| { @compileError(@errorName(e)); };
+    const temp_val = line[i+1 ..];
+    const val = unescapeString(temp_val, temp_val, options) catch |e| { @compileError(@errorName(e)); };
 
     if (key.len == 0 or val.len == 0) continue;
 
