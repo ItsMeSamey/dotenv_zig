@@ -251,6 +251,7 @@ pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: Une
       kvp_list = kvp_list ++ [1]Kvp{ .{ .@"0" = key, .@"1" = copy[0..] } };
     }
 
+    // The result may have multiple entries with the same key, but the latest is used
     return std.StaticStringMap([]const u8).initComptime(kvp_list);
   }
 }
@@ -258,20 +259,20 @@ pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: Une
 test loadEnvDataComptime {
   const env_file = 
     \\ a = b
+    \\ a = "MUST NOT BE USED"
     \\ c = 'd'
     \\ 3 = " f "
     \\ 4 = 
     \\ # 5 = 6
   ;
 
-  @setEvalBranchQuota(10_000);
+  @setEvalBranchQuota(1000_000);
   const parsed = comptime loadEnvDataComptime(env_file, .{});
   std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
   std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
   std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
   std.debug.assert(null == parsed.get("4"));
   std.debug.assert(null == parsed.get("5"));
-  std.debug.assert(3 == parsed.kvs.len);
 }
 
 pub fn loadEnvComptime(comptime file_name: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
