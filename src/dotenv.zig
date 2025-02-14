@@ -311,7 +311,7 @@ pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options
     const key = std.mem.trim(u8, line[0..i], " ");
 
     const temp_val = line[i+1 ..];
-    const val = unescapeString(temp_val, temp_val, options) catch |e| { @compileError(@errorName(e)); };
+    const val = try unescapeString(@constCast(temp_val), temp_val, options);
 
     if (key.len == 0 or val.len == 0) continue;
 
@@ -330,13 +330,18 @@ test loadEnvDataRuntime {
     \\ # 5 = 6
   ;
 
-  const parsed = try loadEnvDataRuntime(env_file, std.testing.allocator, .{});
+  const copy = try std.testing.allocator.dupe(u8, env_file[0..]);
+  defer std.testing.allocator.free(copy);
+
+  var parsed = try loadEnvDataRuntime(copy, std.testing.allocator, .{});
+  defer parsed.deinit();
+
   std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
   std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
   std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
   std.debug.assert(null == parsed.get("4"));
   std.debug.assert(null == parsed.get("5"));
-  std.debug.assert(3 == parsed.map.kvs.len);
+  std.debug.assert(3 == parsed.map.count());
 }
 
 pub const EnvRuntimeType = struct {
