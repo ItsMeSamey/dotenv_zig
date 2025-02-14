@@ -3,7 +3,7 @@
 const std = @import("std");
 
 pub const UnescapeStringOptions = struct {
-  // Which logging function to use when priniting errors, this is not used 
+  /// Which logging function to use when priniting errors
   log_fn: fn (comptime format: []const u8, args: anytype) void = struct {
     fn log_fn(comptime format: []const u8, args: anytype) void {
       if (@inComptime()) {
@@ -17,10 +17,6 @@ pub const UnescapeStringOptions = struct {
   /// Whether or not to unescape and unquoted the quoted strings
   unquote_values: bool = true,
 
-  /// Skips unquoting stings if they are invalid instead of erroring
-  /// NOTE: this is potentially dangerous
-  skip_invalid_strings: bool = false,
-
   /// Whether or not to trim whitespace,
   /// if this is `.yes`, whitespace outside of quotes will always be trimmed
   /// if this is `.quoted`, whitespace will be trimmed only if the string is quoted, (this works even if unquoting strings is disabled)
@@ -28,7 +24,7 @@ pub const UnescapeStringOptions = struct {
   /// if this is `.no`, whitespace will never be trimmed, if the string is quoted, it will be appended to start and end after unescaping
   trim_whitespace: enum {no, quoted, unquoted, yes} = .yes,
 
-  // Whether or not to trim whitespace after unescaping the string
+  /// Whether or not to trim whitespace after unescaping the string
   trim_whitespace_inside_quotes: bool = true
 };
 
@@ -323,6 +319,24 @@ pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options
   }
 
   return retval;
+}
+
+test loadEnvDataRuntime {
+  const env_file = 
+    \\ a = b
+    \\ c = 'd'
+    \\ 3 = " f "
+    \\ 4 = 
+    \\ # 5 = 6
+  ;
+
+  const parsed = try loadEnvDataRuntime(env_file, std.testing.allocator, .{});
+  std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
+  std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
+  std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
+  std.debug.assert(null == parsed.get("4"));
+  std.debug.assert(null == parsed.get("5"));
+  std.debug.assert(3 == parsed.map.kvs.len);
 }
 
 pub const EnvRuntimeType = struct {
