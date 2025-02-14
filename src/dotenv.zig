@@ -230,8 +230,6 @@ test unescapeString {
 /// If a parsing error occurs, a compileError is emitted
 pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
   comptime {
-    @setEvalBranchQuota(10_000);
-
     const Kvp = struct { @"0": []const u8, @"1": []const u8 };
     var kvp_list: []const Kvp = &.{};
 
@@ -266,6 +264,7 @@ test loadEnvDataComptime {
     \\ # 5 = 6
   ;
 
+  @setEvalBranchQuota(10_000);
   const parsed = comptime loadEnvDataComptime(env_file, .{});
   std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
   std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
