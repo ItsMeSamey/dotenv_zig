@@ -368,7 +368,7 @@ pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, optio
   };
   file.close();
 
-  const parsed_map = loadEnvDataRuntime(file_data, allocator, options);
+  const parsed_map = try loadEnvDataRuntime(file_data, allocator, options);
   return .{
     .map = parsed_map.map,
     .file_data = file_data,
