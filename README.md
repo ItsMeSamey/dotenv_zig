@@ -29,7 +29,7 @@ const std = @import("std");
 const dotenv = @import("dotenv");
 
 // Load and parse the .env file at compile time.
-const parsed = dotenv.loadEnvComptime(".env", .{});
+const parsed = comptime dotenv.loadEnvComptime(".env", .{});
 
 pub fn main() !void {
   // Access individual values.
@@ -71,7 +71,7 @@ const std = @import("std");
 const dotenv = @import("dotenv.zig");
 
 // This is embedded into the executable itself, no .env needed at runtime
-const parsed = dotenv.loadEnvComptime(".env", .{});
+const parsed = comptime dotenv.loadEnvComptime(".env", .{});
 
 pub fn main() !void {
   // Print all the values in the map
