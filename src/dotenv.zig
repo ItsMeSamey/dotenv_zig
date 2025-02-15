@@ -284,7 +284,7 @@ pub fn loadEnvComptime(comptime file_name: []const u8, comptime options: Unescap
 fn GetEnvRuntimeType(free_file: bool) type {
   return struct {
     map: std.process.EnvMap,
-    file_data: if (free_file) []u8 else void,
+    freeable_data: if (free_file) []const u8 else void,
 
     /// Get the value for the given key or null if none exists
     pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
@@ -297,7 +297,7 @@ fn GetEnvRuntimeType(free_file: bool) type {
     /// deinit the map and free any data that needs to be freed
     pub fn deinit(self: *@This()) void {
       if (free_file) {
-        self.map.hash_map.allocator.free(self.file_data);
+        self.map.hash_map.allocator.free(self.freeable_data);
       }
       self.map.deinit();
     }
@@ -312,13 +312,9 @@ pub const EnvDataRuntimeType = GetEnvRuntimeType(false);
 
 /// Parses the provided `file_data` string to a StringHashMapUnmanaged
 /// The `file_data` is mutated
-/// It is caller's job to free the file_data and resultant 
-pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvDataRuntimeType {
-  var retval = EnvDataRuntimeType{
-    .map = std.process.EnvMap.init(allocator),
-    .file_data = {},
-  };
-
+/// It is caller's job to free the file_data and returned value 
+/// `context` must have a `.put([]const u8)` function that returns `void` or `!void`
+pub fn loadEnvDataRuntimeContext(file_data: []u8, context: anytype, options: UnescapeStringOptions) !void {
   var it = std.mem.tokenizeAny(u8, file_data, "\r\n");
   while (it.next()) |raw_line| {
     const line = std.mem.trim(u8, raw_line, " \t");
@@ -332,9 +328,21 @@ pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options
 
     if (key.len == 0 or val.len == 0) continue;
 
-    try retval.map.put(key, val);
+    const result = context.put(key, val);
+    if (@TypeOf(result) != void) try result;
   }
+}
 
+/// Parses the provided `file_data` string to a StringHashMapUnmanaged
+/// The `file_data` is mutated
+/// It is caller's job to free the file_data and returned value
+pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvDataRuntimeType {
+  var retval = EnvDataRuntimeType{
+    .map = std.process.EnvMap.init(allocator),
+    .freeable_data = {},
+  };
+
+  try loadEnvDataRuntimeContext(file_data, &retval, options);
   return retval;
 }
 
@@ -364,7 +372,7 @@ test loadEnvDataRuntime {
 pub const EnvRuntimeType = GetEnvRuntimeType(true);
 
 /// Read and parse the provided file
-pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvRuntimeType {
+pub fn loadEnvRuntimeContext(file_name: []const u8, allocator: std.mem.Allocator, context: anytype, options: UnescapeStringOptions) !EnvRuntimeType {
   var file = try std.fs.cwd().openFile(file_name, .{});
 
   const file_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch |e| {
@@ -373,10 +381,21 @@ pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, optio
   };
   file.close();
 
-  const parsed_map = try loadEnvDataRuntime(file_data, allocator, options);
-  return .{
-    .map = parsed_map.map,
-    .file_data = file_data,
+  context.freeable_data = file_data;
+
+  return try loadEnvDataRuntimeContext(file_data, &context, options);
+}
+
+/// Read and parse the provided file
+/// `context` must have a `.put([]const u8)` function that returns `void` or `!void`, and
+/// a freeable_data field of type `[]u8` or `[]const u8`, that holds data that is freed upon deinit
+pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvRuntimeType {
+  var retval = EnvDataRuntimeType{
+    .map = std.process.EnvMap.init(allocator),
+    .freeable_data = undefined,
   };
+
+  try loadEnvRuntimeContext(file_name, allocator, &retval, options);
+  return retval;
 }
 
