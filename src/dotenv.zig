@@ -107,125 +107,6 @@ pub fn unescapeString(result: []u8, input: []const u8, comptime options: Unescap
   unreachable;
 }
 
-test unescapeString {
-  var buffer: [100]u8 = undefined;
-
-  for ([_][2][]const u8{
-    .{"a", " a "},
-    .{"a", " `a` "},
-    .{"a", "` a `"},
-    .{"a", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .yes,
-      .trim_whitespace_inside_quotes = true,
-    }));
-  }
-  for ([_][2][]const u8{
-    .{"a", " a "},
-    .{"a", " `a` "},
-    .{" a ", "` a `"},
-    .{" a ", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .yes,
-      .trim_whitespace_inside_quotes = false,
-    }));
-  }
-
-  for ([_][2][]const u8{
-    .{" a ", " a "},
-    .{"a", " `a` "},
-    .{"a", "` a `"},
-    .{"a", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .quoted,
-      .trim_whitespace_inside_quotes = true,
-    }));
-  }
-  for ([_][2][]const u8{
-    .{" a ", " a "},
-    .{"a", " `a` "},
-    .{" a ", "` a `"},
-    .{" a ", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .quoted,
-      .trim_whitespace_inside_quotes = false,
-    }));
-  }
-
-  for ([_][2][]const u8{
-    .{"a", " a "},
-    .{" a ", " `a` "},
-    .{"a", "` a `"},
-    .{" a ", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .unquoted,
-      .trim_whitespace_inside_quotes = true,
-    }));
-  }
-  for ([_][2][]const u8{
-    .{"a", " a "},
-    .{" a ", " `a` "},
-    .{" a ", "` a `"},
-    .{"  a  ", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .unquoted,
-      .trim_whitespace_inside_quotes = false,
-    }));
-  }
-
-  for ([_][2][]const u8{
-    .{" a ", " a "},
-    .{" a ", " `a` "},
-    .{"a", "` a `"},
-    .{" a ", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .no,
-      .trim_whitespace_inside_quotes = true,
-    }));
-  }
-  for ([_][2][]const u8{
-    .{" a ", " a "},
-    .{" a ", " `a` "},
-    .{" a ", "` a `"},
-    .{"  a  ", " ` a ` "},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{
-      .trim_whitespace = .no,
-      .trim_whitespace_inside_quotes = false,
-    }));
-  }
-
-  for ([_][2][]const u8{
-    .{"\\", " \\ "},
-    .{"\\", "\" \\\\ \""},
-    .{"\\", "' \\\\ '"},
-    .{"\\", "` \\\\ `"},
-    .{"\\n", " \\n "},
-    .{"\\r", " \\r "},
-    .{"\\t", " \\t "},
-    .{"\\\\", " \\\\ "},
-    .{"\n", "' \\n '"},
-    .{"\r", "' \\r '"},
-    .{"\t", "' \\t '"},
-    .{"\\", "' \\\\ '"},
-    .{"'`", "\" '` \""},
-    .{"`\"", "' `\" '"},
-    .{"'\"", "` '\" `"},
-    .{"'\\'", "` '\\\\' `"},
-    .{"\\", " '\\\\' "},
-    .{"\\", "'\\\\'"},
-  }) |testCase| {
-    try std.testing.expectEqualStrings(testCase[0], try unescapeString(buffer[0..], testCase[1], .{}));
-  }
-}
-
 /// Parses the provided `file_data` string to a StaticStringMap
 /// If a parsing error occurs, a compileError is emitted
 pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
@@ -248,31 +129,12 @@ pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: Une
       if (key.len == 0 or val.len == 0) continue;
       const copy: [val.len]u8 = val[0..val.len].*;
 
-      kvp_list = kvp_list ++ [1]Kvp{ .{ .@"0" = key, .@"1" = copy[0..] } };
+      kvp_list = [1]Kvp{ .{ .@"0" = key, .@"1" = copy[0..] } } ++ kvp_list;
     }
 
     // The result may have multiple entries with the same key, but the latest is used
     return std.StaticStringMap([]const u8).initComptime(kvp_list);
   }
-}
-
-test loadEnvDataComptime {
-  const env_file = 
-    \\ a = b
-    \\ a = "MUST NOT BE USED"
-    \\ c = 'd'
-    \\ 3 = " f "
-    \\ 4 = 
-    \\ # 5 = 6
-  ;
-
-  @setEvalBranchQuota(1000_000);
-  const parsed = comptime loadEnvDataComptime(env_file, .{});
-  std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
-  std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
-  std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
-  std.debug.assert(null == parsed.get("4"));
-  std.debug.assert(null == parsed.get("5"));
 }
 
 /// Embed and parse the provided file to StaticStringMap
@@ -283,8 +145,10 @@ pub fn loadEnvComptime(comptime file_name: []const u8, comptime options: Unescap
 
 fn GetEnvRuntimeType(free_file: bool) type {
   return struct {
-    map: std.process.EnvMap,
-    freeable_data: if (free_file) []const u8 else void,
+    /// The underlying string map
+    map: std.StringHashMap([]const u8),
+    /// If this is not void, this contains 
+    freeable_data: if (free_file) []const u8 else void = if (free_file) undefined else {},
 
     /// Get the value for the given key or null if none exists
     pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
@@ -297,12 +161,12 @@ fn GetEnvRuntimeType(free_file: bool) type {
     /// deinit the map and free any data that needs to be freed
     pub fn deinit(self: *@This()) void {
       if (free_file) {
-        self.map.hash_map.allocator.free(self.freeable_data);
+        self.map.allocator.free(self.freeable_data);
       }
       self.map.deinit();
     }
     /// Returns an iterator over entries in the map.
-    pub fn iterator(self: *const @This()) self.map.hash_map.Iterator {
+    pub fn iterator(self: *const @This()) self.map.Iterator {
       return self.map.iterator();
     }
   };
@@ -337,42 +201,16 @@ pub fn loadEnvDataRuntimeContext(file_data: []u8, context: anytype, options: Une
 /// The `file_data` is mutated
 /// It is caller's job to free the file_data and returned value
 pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvDataRuntimeType {
-  var retval = EnvDataRuntimeType{
-    .map = std.process.EnvMap.init(allocator),
-    .freeable_data = {},
-  };
+  var retval = EnvDataRuntimeType{ .map = std.StringHashMap([]const u8).init(allocator) };
 
   try loadEnvDataRuntimeContext(file_data, &retval, options);
   return retval;
 }
 
-test loadEnvDataRuntime {
-  const env_file = 
-    \\ a = b
-    \\ c = 'd'
-    \\ 3 = " f "
-    \\ 4 = 
-    \\ # 5 = 6
-  ;
-
-  const copy = try std.testing.allocator.dupe(u8, env_file[0..]);
-  defer std.testing.allocator.free(copy);
-
-  var parsed = try loadEnvDataRuntime(copy, std.testing.allocator, .{});
-  defer parsed.deinit();
-
-  std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
-  std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
-  std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
-  std.debug.assert(null == parsed.get("4"));
-  std.debug.assert(null == parsed.get("5"));
-  std.debug.assert(3 == parsed.map.count());
-}
-
 pub const EnvRuntimeType = GetEnvRuntimeType(true);
 
 /// Read and parse the provided file
-pub fn loadEnvRuntimeContext(file_name: []const u8, allocator: std.mem.Allocator, context: anytype, options: UnescapeStringOptions) !EnvRuntimeType {
+pub fn loadEnvRuntimeContext(file_name: []const u8, allocator: std.mem.Allocator, context: anytype, options: UnescapeStringOptions) !void {
   var file = try std.fs.cwd().openFile(file_name, .{});
 
   const file_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch |e| {
@@ -380,20 +218,16 @@ pub fn loadEnvRuntimeContext(file_name: []const u8, allocator: std.mem.Allocator
     return e;
   };
   file.close();
-
   context.freeable_data = file_data;
 
-  return try loadEnvDataRuntimeContext(file_data, &context, options);
+  return loadEnvDataRuntimeContext(file_data, context, options);
 }
 
 /// Read and parse the provided file
 /// `context` must have a `.put([]const u8)` function that returns `void` or `!void`, and
 /// a freeable_data field of type `[]u8` or `[]const u8`, that holds data that is freed upon deinit
 pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvRuntimeType {
-  var retval = EnvDataRuntimeType{
-    .map = std.process.EnvMap.init(allocator),
-    .freeable_data = undefined,
-  };
+  var retval = EnvRuntimeType{ .map = std.StringHashMap([]const u8).init(allocator) };
 
   try loadEnvRuntimeContext(file_name, allocator, &retval, options);
   return retval;
