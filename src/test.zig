@@ -136,7 +136,7 @@ test loadEnvComptime {
 
 const loadEnvRuntime = dotenv.loadEnvRuntime;
 test loadEnvRuntime {
-  var parsed = try loadEnvRuntime("test.env", std.testing.allocator, .{});
+  var parsed = try loadEnvRuntime("src/test.env", std.testing.allocator, .{});
   defer parsed.deinit();
 
   std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
@@ -145,26 +145,5 @@ test loadEnvRuntime {
   std.debug.assert(null == parsed.get("4"));
   std.debug.assert(null == parsed.get("5"));
   std.debug.assert(3 == parsed.map.count());
-}
-
-test "README.md" {
-  {
-    const parsed = comptime dotenv.loadEnvComptime("test.env", .{});
-
-    // printing of `a=SHOULD BE OVERRIDDEN` here is expected
-    for (0..parsed.kvs.len) |i| {
-      std.debug.print("{s}={s}\n", .{ parsed.kvs.keys[i], parsed.kvs.values[i] });
-    }
-  }
-
-  {
-    var parsed = try dotenv.loadEnvRuntime("test.env", std.testing.allocator, .{});
-    defer parsed.deinit();
-
-    var iter = parsed.map.iterator();
-    while (iter.next()) |kvp| {
-      std.debug.print("{s}={s}\n", .{ kvp.key_ptr.*, kvp.value_ptr.* });
-    }
-  }
 }
 

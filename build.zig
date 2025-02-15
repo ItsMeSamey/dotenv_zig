@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
 
   {
     const tests = b.addTest(.{
-      .root_source_file = b.path("src/dotenv.zig"),
+      .root_source_file = b.path("src/test.zig"),
       .target = target,
       .optimize = optimize,
     });
