@@ -275,31 +275,48 @@ test loadEnvDataComptime {
   std.debug.assert(null == parsed.get("5"));
 }
 
+/// Embed and parse the provided file to StaticStringMap
 pub fn loadEnvComptime(comptime file_name: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
   const file_data = @embedFile(file_name);
   return loadEnvDataComptime(file_data, options);
 }
 
-pub const EnvDataRuntimeType = struct {
-  map: std.process.EnvMap,
+fn GetEnvRuntimeType(free_file: bool) type {
+  return struct {
+    map: std.process.EnvMap,
+    file_data: if (free_file) []u8 else void,
 
-  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
-    return self.map.get(key);
-  }
-  pub fn put(self: *@This(), key: []const u8, value: []const u8) !void {
-    return self.map.put(key, value);
-  }
-  pub fn deinit(self: *@This()) void {
-    self.map.deinit();
-  }
-};
+    /// Get the value for the given key or null if none exists
+    pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
+      return self.map.get(key);
+    }
+    /// Put a key value pair in the map, (the key should not be mutated after this)
+    pub fn put(self: *@This(), key: []const u8, value: []const u8) !void {
+      return self.map.put(key, value);
+    }
+    /// deinit the map and free any data that needs to be freed
+    pub fn deinit(self: *@This()) void {
+      if (free_file) {
+        self.map.hash_map.allocator.free(self.file_data);
+      }
+      self.map.deinit();
+    }
+    /// Returns an iterator over entries in the map.
+    pub fn iterator(self: *const @This()) self.map.hash_map.Iterator {
+      return self.map.iterator();
+    }
+  };
+}
+
+pub const EnvDataRuntimeType = GetEnvRuntimeType(false);
 
 /// Parses the provided `file_data` string to a StringHashMapUnmanaged
 /// The `file_data` is mutated
 /// It is caller's job to free the file_data and resultant 
 pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvDataRuntimeType {
   var retval = EnvDataRuntimeType{
-    .map = std.process.EnvMap.init(allocator)
+    .map = std.process.EnvMap.init(allocator),
+    .file_data = {},
   };
 
   var it = std.mem.tokenizeAny(u8, file_data, "\r\n");
@@ -344,21 +361,9 @@ test loadEnvDataRuntime {
   std.debug.assert(3 == parsed.map.count());
 }
 
-pub const EnvRuntimeType = struct {
-  map: std.process.EnvMap,
-  file_data: []u8,
+pub const EnvRuntimeType = GetEnvRuntimeType(true);
 
-  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
-    return self.map.get(key);
-  }
-  pub fn put(self: *@This(), key: []const u8, value: []const u8) !void {
-    return self.map.put(key, value);
-  }
-  pub fn deinit(self: *@This()) void {
-    self.map.hash_map.allocator.free(self.file_data);
-    self.map.deinit();
-  }
-};
+/// Read and parse the provided file
 pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvRuntimeType {
   var file = try std.fs.cwd().openFile(file_name, .{});
 
