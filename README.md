@@ -18,7 +18,7 @@ exe.root_module.addImport("dotenv", dotenv.module("dotenv"));
 
 ## 🚨🚨 Microlibrary 🚨🚨
 
-This is a microlibrary. The code is mostly straightforward. Consider simply copying `dotenv.zig` directly into your project instead of adding a dependency. It's only about 250 lines of code (including tests). The choice is yours.
+This is a microlibrary. The code is mostly straightforward. Consider simply copying `dotenv.zig` directly into your project instead of adding a dependency. It's only about 250 lines of code . The choice is yours.
 
 ## Usage
 
