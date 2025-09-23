@@ -1,9 +1,8 @@
 .{
-  .name = "dotenv_zig",
-  .version = "0.0.1",
-  .minimum_zig_version = "0.13.0",
-
-  .dependencies = .{},
+  .name = .dotenv,
+  .version = "0.1.0",
+  .minimum_zig_version = "0.14.0",
+  .fingerprint = 0xd19ca053c8ed32e9,
 
   .paths = .{
     "build.zig",

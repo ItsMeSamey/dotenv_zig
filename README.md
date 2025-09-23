@@ -2,6 +2,7 @@
 Load ENV vars from `.env` file 
 
 This library provides functions for loading environment variables from `.env` files at both compile time and runtime. It supports unquoting and unescaping of string values and offers flexible options for whitespace handling.
+Supports zig `0.14.0`, `0.14.1` and `0.15.1`.
 
 ## Installation
 
