@@ -128,6 +128,14 @@ const EnvType = struct {
     }
   };
 
+  /// Format the entire map as KEY=VALUE\n lines for printing
+  pub fn format(self: *const @This(), writer: std.Io.Writer) std.Io.Writer.Error!void {
+    var iter = self.iterator();
+    while (iter.next()) |entry| {
+      try writer.print("{s}={s}\n", .{ entry.key, entry.value });
+    }
+  }
+
   /// Returns an iterator over entries in the map.
   pub fn iterator(self: *const @This()) Iterator {
     return .{
@@ -211,18 +219,31 @@ inline fn decodeHex(char: u8) u8 {
   return @as([*]const u8, @ptrFromInt((@intFromPtr(&HEX_DECODE_ARRAY) - @as(usize, '0'))))[char];
 }
 
+/// Errors specific to parsing keys
 const ParseKeyError = error{
+  /// Thrown when the first character of a key (or substitution key) is not alphabetic (a-zA-Z) or '_'
   InvalidFirstKeyChar,
+  /// Thrown when a subsequent character in a key (or substitution key) is not alphanumeric (a-zA-Z0-9) or '_'
+  /// Also thrown when the character immediately after optional whitespace following the key is not '=' (e.g., KEY?=value)
   InvalidKeyChar,
+  /// Thrown when EOF is reached before finding '=' after parsing a key
   UnexpectedEndOfFile,
 };
 
+/// Errors specific to parsing values (includes key errors and allocator errors)
 pub const ParseValueError = error{
-  UnexpectedEndOfValue,
+  /// Thrown when EOF is reached inside a quoted value (' or ") without a closing quote
   UnterminatedQuote,
+  /// Thrown in double-quoted values when an escape sequence is invalid:
+  /// - \x followed by non-hex digits (0-9a-fA-F), including partial (e.g., \xG or \xGG where G invalid)
+  /// - \ followed by an unrecognized character (not \\, \", \$, \n, \r, \t, \v, \f, \x)
   InvalidEscapeSequence,
+  /// Thrown when parsing a substitution ${KEY} and EOF is reached before finding the closing '}'
   UnterminatedSubstitutionBlock,
+  /// Thrown after parsing a value (quoted or unquoted), when skipping trailing whitespace,
+  /// and encountering a non-newline, non-'#' character (e.g., extra text after closing quote like `"value" extra`) 
   UnexpectedCharacter,
+  /// Thrown when expanding a substitution ${KEY} and no prior key named KEY exists in the map
   SubstitutionKeyNotFound,
 } || ParseKeyError || std.mem.Allocator.Error;
 
@@ -531,19 +552,6 @@ fn GetParser(options: ParseOptions) type {
             return;
           }
           if (quote_char != null and c == quote_char.?) break :blk;
-
-          // if (options.utf8) {
-          //   if (std.unicode.utf8ByteSequenceLength(c)) |utflen| {
-          //     if (self.at + utflen >= self.string.len) {
-          //       options.log_fn("Unexpected end of file while parsing a{s} unicode value at ", .{quote_string});
-          //       self.printErrorMarker();
-          //       return ParseValueError.UnexpectedEndOfFile;
-          //     }
-          //     try self.result.appendSlice(self.allocator, self.string[self.at-1..][0..utflen]);
-          //     self.at += utflen - 1;
-          //     continue :blk self.takeU9();
-          //   }
-          // }
 
           try self.result.append(self.allocator, @intCast(c));
           continue :blk self.takeU9();
