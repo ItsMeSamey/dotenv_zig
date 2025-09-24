@@ -1021,3 +1021,146 @@ test "trailing newline in file" {
   defer parsed.deinit(std.testing.allocator);
   try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
 }
+
+test "key starting with underscore" {
+  const test_data =
+    \\ _KEY=value
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("value", parsed.get("_KEY").?);
+}
+
+test "value with only whitespace trims to empty" {
+  const test_data = "KEY=   \t";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("", parsed.get("KEY").?);
+}
+
+test "partial hex escape errors" {
+  const test_data =
+    \\ KEY="val\xG"
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidEscapeSequence, err);
+}
+
+test "escaped newline in single quotes literal" {
+  const test_data =
+    \\ KEY='va\nl'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va\\nl", parsed.get("KEY").?);
+}
+
+test "substitution key with digits" {
+  const test_data =
+    \\ KEY123=val
+    \\ URL=${KEY123}
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val", parsed.get("URL").?);
+}
+
+test "inline comment after quoted value" {
+  const test_data =
+    \\ KEY="val" # comment
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
+}
+
+test "key with multiple = parses first" {
+  const test_data =
+    \\ KEY=val=more
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val=more", parsed.get("KEY").?);
+}
+
+test "escaped quote inside single quotes" {
+  const test_data =
+    \\ KEY='va\'\'l'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va''l", parsed.get("KEY").?);
+}
+
+test "unquoted value ending with backslash literal" {
+  const test_data =
+    \\ KEY=val\\
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val\\", parsed.get("KEY").?);
+}
+
+test "substitution EOF in key" {
+  const test_data =
+    \\ KEY=${UNFINISHED
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.UnterminatedSubstitutionBlock, err);
+}
+
+test "no value after =" {
+  const test_data =
+    \\ KEY=
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("", parsed.get("KEY").?);
+}
+
+test "comment after whitespace" {
+  const test_data =
+    \\ KEY=value   # comment
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
+}
+
+test "quoted value with leading space preserved" {
+  const test_data =
+    \\ KEY=" val "
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings(" val ", parsed.get("KEY").?);
+}
+
+test "single quotes with backslash literal" {
+  const test_data =
+    \\ KEY='va\\l'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va\\l", parsed.get("KEY").?);
+}
+
+test "hex escape at end of value" {
+  const test_data =
+    \\ KEY="val\xFF"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val\xFF", parsed.get("KEY").?);
+}
+
+// TODO: add utf8 support
+// test "UTF-8 key and value" {
+//   const test_data =
+//     \\ KEY_ café=value_ café
+//   ;
+//   var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+//   defer parsed.deinit(std.testing.allocator);
+//   try std.testing.expect(std.mem.eql(u8, "value_ café", parsed.get("KEY_ café").?));
+// }
+
