@@ -1,15 +1,13 @@
-//! These functions can be used to load env files at runtime or comptime.
-
 const std = @import("std");
 
-pub const UnescapeStringOptions = struct {
+pub const ParseOptions = struct {
   /// Which logging function to use when priniting errors
   log_fn: fn (comptime format: []const u8, args: anytype) void = struct {
     fn log_fn(comptime format: []const u8, args: anytype) void {
       if (@inComptime()) {
-        @compileError(std.fmt.comptimePrint(format, args));
+        @compileLog(std.fmt.comptimePrint(format, args));
       } else {
-        std.log.err(format, args);
+        std.debug.print(format, args);
       }
     }
   }.log_fn,
@@ -17,219 +15,493 @@ pub const UnescapeStringOptions = struct {
   /// Whether or not to unescape and unquoted the quoted strings
   unquote_values: bool = true,
 
-  /// Whether or not to trim whitespace,
-  /// if this is `.yes`, whitespace outside of quotes will always be trimmed
-  /// if this is `.quoted`, whitespace will be trimmed only if the string is quoted, (this works even if unquoting strings is disabled)
-  /// if this is `.unquoted`, whitespace will be trimmed only if the string is unquoted (this works even if unquoting strings is disabled)
-  /// if this is `.no`, whitespace will never be trimmed, if the string is quoted, it will be appended to start and end after unescaping
-  trim_whitespace: enum {no, quoted, unquoted, yes} = .yes,
+  /// Whether or not to trim whitespace (whitespace inside quotes is never trimmed)
+  trim_whitespace: bool = true,
 
-  /// Whether or not to trim whitespace after unescaping the string
-  trim_whitespace_inside_quotes: bool = true
+  /// substitute variables inside of `${}` blocks
+  substitute: bool = false,
+
+  /// the type of map to use
+  map_type: type = std.StringHashMapUnmanaged([]const u8),
+
+  /// type of map to use at comptime
+  map_type_comptime: type = std.StaticStringMap([]const u8),
+
+  is_valid_first_key_char_fn: fn (self: @This(), char: u8) bool = struct {
+    fn is_valid_first_key_char(self: Self, char: u8) bool {
+      const is_valid = std.ascii.isAlphabetic(char) or char == '_';
+      if (!is_valid) self.log_fn("First character for key should be [a-zA-Z_]; got: `{c}`\n", .{char});
+      return is_valid;
+    }
+  }.is_valid_first_key_char,
+
+  is_valid_key_char_fn: fn (self: @This(), char: u8) bool = struct {
+    fn is_valid_key_char(self: Self, char: u8) bool {
+      const is_valid = std.ascii.isAlphanumeric(char) or char == '_';
+      if (!is_valid) self.log_fn("Key can only contain [a-zA-Z0-9_]; got: `{c}`\n", .{char});
+      return is_valid;
+    }
+  }.is_valid_key_char,
+
+  const Self = @This();
+
+  pub const NopLogFn = struct {
+    fn log_fn(comptime _: []const u8, _: anytype) void {}
+  }.log_fn;
+
+  fn is_valid_first_key_char(self: Self, char: u8) bool {
+    return self.is_valid_first_key_char_fn(self, char);
+  }
+
+  fn is_valid_key_char(self: Self, char: u8) bool {
+    return self.is_valid_key_char_fn(self, char);
+  }
 };
 
-/// Function used to unescape quoted string and trim any whitespace
-pub fn unescapeString(result: []u8, input: []const u8, comptime options: UnescapeStringOptions) ![]const u8 {
-  const val = std.mem.trim(u8, input, " \t");
-  if (val.len == 0 or (val[0] != '"' and val[0] != '\'' and val[0] != '`')) return switch (options.trim_whitespace) {
-    .no, .quoted => input,
-    .unquoted, .yes => val,
-  };
-
-  if (!options.unquote_values) return switch (options.trim_whitespace) {
-    .no, .unquoted => input,
-    .quoted, .yes => val,
-  };
-
-  // String must start and end with same kind of quotes
-  if (val[0] != val[val.len - 1]) {
-    options.log_fn("Invalid string --> {s} <--. if it starts with a quote, it must end with the same kind of quote too", .{val});
-    return error.InvalidString;
-  }
-
-  var stripped_val = if (options.trim_whitespace_inside_quotes) std.mem.trim(u8, val[1..val.len - 1], " \t") else val[1..val.len - 1];
-
-  switch (val[0]) {
-    inline '"', '\'', '`' => |escape_char| {
-      var idx: usize = 0;
-      var result_idx: usize = 0;
-      if (options.trim_whitespace == .no or options.trim_whitespace == .unquoted) {
-        while (input[result_idx] != escape_char) {
-          result[result_idx] = input[result_idx];
-          result_idx += 1;
-        }
-      }
-      while (idx < stripped_val.len - 1) {
-        if (stripped_val[idx] == escape_char) {
-          options.log_fn("Invalid escape sequence {s} in --> {s} <--", .{ stripped_val[idx .. idx + 1], val });
-          return error.InvalidString;
-        } else if (stripped_val[idx] == '\\') {
-          switch (stripped_val[idx + 1]) {
-            'n' => result[result_idx] = '\n',
-            'r' => result[result_idx] = '\r',
-            't' => result[result_idx] = '\t',
-            '\\' => result[result_idx] = '\\',
-            escape_char => result[result_idx] = escape_char,
-            else => {
-              options.log_fn("Unexpected escape sequence {s} in --> {s} <--", .{ stripped_val[idx .. idx + 1], val });
-              return error.InvalidEscapeSequence;
-            },
-          }
-          idx += 2;
-        } else {
-          result[result_idx] = stripped_val[idx];
-          idx += 1;
-        }
-        result_idx += 1;
-      }
-
-      if (idx == stripped_val.len - 1) {
-        if (stripped_val[idx] == '\\' or stripped_val[idx] == escape_char) {
-          options.log_fn("Invalid terminal character {s} in --> {s} <--, string cant end with {s}", .{ stripped_val[idx .. idx + 1], val, if (stripped_val[idx] == '\\') "a \\ (backslash)" else "a the quote (" ++ [_]u8{escape_char} ++ ")" });
-          return error.InvalidString;
-        }
-        result[result_idx] = stripped_val[idx];
-        result_idx += 1;
-      }
-
-      if (options.trim_whitespace == .no or options.trim_whitespace == .unquoted) {
-        var input_idx: usize = input.len - 1;
-        while (input[input_idx] != escape_char) {
-          result[result_idx] = input[input_idx];
-          input_idx -= 1;
-          result_idx += 1;
-        }
-      }
-      return result[0..result_idx];
-    },
-    else => unreachable,
-  }
-  unreachable;
-}
-
-/// Parses the provided `file_data` string to a StaticStringMap
-/// If a parsing error occurs, a compileError is emitted
-pub fn loadEnvDataComptime(comptime file_data: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
-  comptime {
-    const Kvp = struct { @"0": []const u8, @"1": []const u8 };
-    var kvp_list: []const Kvp = &.{};
-
-    var it = std.mem.tokenizeAny(u8, file_data, "\r\n");
-    while (it.next()) |raw_line| {
-      const line = std.mem.trim(u8, raw_line, " \t");
-      if (line.len == 0 or line[0] == '#') continue;
-
-      const i = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-      const key = std.mem.trim(u8, line[0..i], " ");
-
-      const temp_val = line[i+1 ..];
-      var data_arr: [temp_val.len]u8 = undefined;
-      const val = unescapeString(data_arr[0..], temp_val, options) catch |e| { @compileError(@errorName(e)); };
-
-      if (key.len == 0 or val.len == 0) continue;
-      const copy: [val.len]u8 = val[0..val.len].*;
-
-      kvp_list = [1]Kvp{ .{ .@"0" = key, .@"1" = copy[0..] } } ++ kvp_list;
-    }
-
-    // The result may have multiple entries with the same key, but the latest is used
-    return std.StaticStringMap([]const u8).initComptime(kvp_list);
-  }
-}
-
-/// Embed and parse the provided file to StaticStringMap
-pub fn loadEnvComptime(comptime file_name: []const u8, comptime options: UnescapeStringOptions) std.StaticStringMap([]const u8) {
-  const file_data = @embedFile(file_name);
-  return loadEnvDataComptime(file_data, options);
-}
-
-fn GetEnvRuntimeType(free_file: bool) type {
+fn GetEnvType(T: type) type {
   return struct {
     /// The underlying string map
-    map: std.StringHashMap([]const u8),
+    map: T,
     /// If this is not void, this contains 
-    freeable_data: if (free_file) []const u8 else void = if (free_file) undefined else {},
+    _freeable_data: []const u8,
 
     /// Get the value for the given key or null if none exists
     pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
       return self.map.get(key);
     }
     /// Put a key value pair in the map, (the key should not be mutated after this)
-    pub fn put(self: *@This(), key: []const u8, value: []const u8) !void {
-      return self.map.put(key, value);
+    pub fn put(self: *@This(), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+      return self.map.put(allocator, key, value);
     }
     /// deinit the map and free any data that needs to be freed
-    pub fn deinit(self: *@This()) void {
-      if (free_file) {
-        self.map.allocator.free(self.freeable_data);
-      }
-      self.map.deinit();
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+      allocator.free(self._freeable_data);
+      self.map.deinit(allocator);
     }
     /// Returns an iterator over entries in the map.
-    pub fn iterator(self: *const @This()) self.map.Iterator {
+    pub fn iterator(self: *const @This()) @TypeOf(self.map).Iterator {
       return self.map.iterator();
     }
   };
 }
 
-pub const EnvDataRuntimeType = GetEnvRuntimeType(false);
+pub const ParseError = ParseValueError || std.fs.File.OpenError || std.fs.File.ReadError;
 
-/// Parses the provided `file_data` string to a StringHashMapUnmanaged
-/// The `file_data` is mutated
-/// It is caller's job to free the file_data and returned value 
-/// `context` must have a `.put([]const u8)` function that returns `void` or `!void`
-pub fn loadEnvDataRuntimeContext(file_data: []u8, context: anytype, options: UnescapeStringOptions) !void {
-  var it = std.mem.tokenizeAny(u8, file_data, "\r\n");
-  while (it.next()) |raw_line| {
-    const line = std.mem.trim(u8, raw_line, " \t");
-    if (line.len == 0 or line[0] == '#') continue;
-
-    const i = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-    const key = std.mem.trim(u8, line[0..i], " ");
-
-    const temp_val = line[i+1 ..];
-    const val = try unescapeString(@constCast(temp_val), temp_val, options);
-
-    if (key.len == 0 or val.len == 0) continue;
-
-    const result = context.put(key, val);
-    if (@TypeOf(result) != void) try result;
-  }
+/// Read and parse the `.env` file to a HashMap
+pub fn load(allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!GetEnvType(options.map_type) {
+  return loadFrom(".env", allocator, options);
 }
 
-/// Parses the provided `file_data` string to a StringHashMapUnmanaged
-/// The `file_data` is mutated
-/// It is caller's job to free the file_data and returned value
-pub fn loadEnvDataRuntime(file_data: []u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvDataRuntimeType {
-  var retval = EnvDataRuntimeType{ .map = std.StringHashMap([]const u8).init(allocator) };
-
-  try loadEnvDataRuntimeContext(file_data, &retval, options);
-  return retval;
-}
-
-pub const EnvRuntimeType = GetEnvRuntimeType(true);
-
-/// Read and parse the provided file
-pub fn loadEnvRuntimeContext(file_name: []const u8, allocator: std.mem.Allocator, context: anytype, options: UnescapeStringOptions) !void {
+/// Read and parse the provided env file to a HashMap
+pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!GetEnvType(options.map_type) {
   var file = try std.fs.cwd().openFile(file_name, .{});
-
   const file_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch |e| {
     file.close();
     return e;
   };
   file.close();
-  context.freeable_data = file_data;
+  defer allocator.free(file_data);
 
-  return loadEnvDataRuntimeContext(file_data, context, options);
+  return loadFromData(file_data, allocator, options);
 }
 
-/// Read and parse the provided file
-/// `context` must have a `.put([]const u8)` function that returns `void` or `!void`, and
-/// a freeable_data field of type `[]u8` or `[]const u8`, that holds data that is freed upon deinit
-pub fn loadEnvRuntime(file_name: []const u8, allocator: std.mem.Allocator, options: UnescapeStringOptions) !EnvRuntimeType {
-  var retval = EnvRuntimeType{ .map = std.StringHashMap([]const u8).init(allocator) };
+/// Read and parse the `.env` file to a StaticStringMap at comptime
+pub fn loadFromData(data: [] u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!GetEnvType(options.map_type) {
+  return GetParser(false, options).parse(data, allocator);
+}
 
-  try loadEnvRuntimeContext(file_name, allocator, &retval, options);
-  return retval;
+// Parse `.env` file to a StaticStringMap at comptime
+pub fn loadComptime(options: ParseOptions) options.map_type_comptime {
+  return comptime loadFromComptime(".env", options);
+}
+
+// Parse the provided .env file to a StaticStringMap at comptime
+pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) options.map_type_comptime {
+  return comptime loadFromDataComptime(@embedFile(file_name), options);
+}
+
+/// Parses the provided `file_data` string to a StaticStringMap
+/// If a parsing error occurs, a compileError is emitted
+pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) options.map_type_comptime {
+  return comptime GetParser(true, options).parse(file_data, undefined) catch |e| @compileError(@errorName(e));
+}
+
+// Rest of the parsing logic
+
+fn isOneOf(c: u8, comptime chars: []const u8) bool {
+  const VectorType = @Vector(chars.len, u8);
+  const query_vec: VectorType = chars[0..chars.len].*;
+  const current_vec: VectorType = @splat(c);
+  return @reduce(.Min, query_vec ^ current_vec) == 0;
+}
+
+fn escaped(c: u8) ?*const [2]u8 {
+  return switch (c) {
+    '\\' => "\\\\",
+    '\n' => "\\n",
+    '\r' => "\\r",
+    '\t' => "\\t",
+    '\x0B' => "\\v",
+    '\x0C' => "\\f",
+    inline else => null,
+  };
+}
+
+const HEX_DECODE_ARRAY: [128]u8 = blk: {
+  var all = [1]u8{0xFF} * 128;
+  for ('0'..'9') |b| all[b - '0'] = b - '0';
+  for ('A'..'F') |b| all[b - '0'] = b - 'A' + 10;
+  for ('a'..'f') |b| all[b - '0'] = b - 'a' + 10;
+  break :blk all;
+};
+
+const ParseKeyError = error{
+  InvalidFirstKeyChar,
+  InvalidKeyChar,
+  UnexpectedEndOfKey,
+};
+
+pub const ParseValueError = error{
+  UnexpectedEndOfValue,
+  UnterminatedQuote,
+  InvalidEscapeSequence,
+  UnterminatedSubstitutionBlock,
+} || ParseKeyError || std.mem.Allocator.Error;
+
+fn GetParser(in_comptime: bool, options: ParseOptions) type {
+  return struct {
+    string: []const u8,
+    allocator: if (in_comptime) void else std.mem.Allocator,
+    result: if (in_comptime) struct {
+      items: []const u8 = &.{},
+
+      fn append(self: *@This(), _: void, byte: u8) !void {
+        self.appendSlice(undefined, [_]u8{byte});
+      }
+
+      fn appendSlice(self: *@This(), _: void, bytes: []const u8) !void {
+        self.items = self.items ++ bytes;
+      }
+    } else std.ArrayList(u8) = .{},
+    map: if (in_comptime) options.map_type_comptime else options.map_type = .{},
+
+    at: usize = 0,
+    line: usize = 0,
+    line_start: usize = 0,
+
+    fn done(self: *@This()) bool {
+      return self.at > self.string.len;
+    }
+
+    fn current(self: *@This()) ?u8 {
+      if (self.done()) return null;
+      return self.string[self.at];
+    }
+
+    fn last(self: *@This()) u8 {
+      std.debug.assert(self.at != 0);
+      return self.string[self.at - 1];
+    }
+
+    fn take(self: *@This()) ?u8 {
+      if (self.done()) return null;
+      self.at += 1;
+      return self.last();
+    }
+
+    fn skipUpto(self: *@This(), comptime end: u8) void {
+      self.skipUptoAny(std.fmt.comptimePrint("{c}", .{end}));
+    }
+
+    fn skipUptoAny(self: *@This(), comptime end: []const u8) void {
+      while (self.at < self.string.len and !isOneOf(self.current().?, end)) {
+        self.at += 1;
+      }
+    }
+
+    fn skip(self: *@This(), comptime char: u8) void {
+      self.skipAny(std.fmt.comptimePrint("{c}", .{char}));
+    }
+    
+    fn skipAny(self: *@This(), comptime chars: []const u8) void {
+      while (self.at < self.string.len and isOneOf(self.current().?, chars)) {
+        self.at += 1;
+      }
+    }
+
+    fn currentAsSlice(self: *@This()) []const u8 {
+      std.debug.assert(self.at < self.string.len);
+      return self.string[self.at..][0..1];
+    }
+
+    fn printErrorMarker(self: *@This()) void {
+      options.log_fn(":{d}:{d}\n{s}\n", .{self.line, self.at - self.line_start, self.string[self.line_start..self.at-1]});
+      for (0..self.line_start - self.at) |_| {
+        options.log_fn(" ", .{});
+      }
+      options.log_fn("^\n", .{});
+    }
+
+    fn parseKey(self: *@This()) ParseKeyError!?[]const u8 {
+      // Skip any whitespace / comment lines, break at first non-whitespace character
+      while (true) {
+        self.skipAny(" \t\x0B\r\x0C");
+        const c = self.current() orelse return null;
+
+        if (c == '#') {
+          self.skipUpto('\n');
+          _ = self.take();
+        } else if (c == '\n') {
+          self.line += 1;
+          self.line_start = self.at;
+          _ = self.take();
+        } else break;
+      }
+
+      const start = self.at; // starting index of our key in the string
+
+      // ensure first key char is valid
+      if (!options.is_valid_first_key_char(self.take().?)) {
+        self.at -= 1;
+        options.log_fn("Invalid first character `{s}` for key at ", .{escaped(self.current().?) orelse self.currentAsSlice()});
+        self.printErrorMarker();
+        return ParseKeyError.InvalidFirstKeyChar;
+      }
+
+      var end: usize = undefined;
+
+      // Consume key chars untile we encounter something unexpected
+      while (self.take()) |c| {
+        if (isOneOf(c, " \t\x0B=")) {
+          end = self.at - 1;
+
+          if (c == '=') break;
+          self.skipAny(" \t\x0B");
+          const end_char = self.current() orelse continue;
+          if (end_char == '=') break;
+
+          options.log_fn("Got unexpected `{s}`, expected `=` ", .{escaped(end_char) orelse self.currentAsSlice()});
+          self.printErrorMarker();
+          return ParseKeyError.UnexpectedEndOfKey;
+        } else if (!options.is_valid_key_char(c)) {
+          self.at -= 1;
+          options.log_fn("Invalid character `{s}` while parsing key at ", .{escaped(c) orelse self.currentAsSlice()});
+          self.printErrorMarker();
+          return ParseKeyError.InvalidKeyChar;
+        }
+      } else {
+        options.log_fn("Unexpected end of file while parsing key at ", .{});
+        self.at = start;
+        self.printErrorMarker();
+
+        return ParseKeyError.UnexpectedEndOfKey;
+      }
+
+      return self.string[start..end];
+    }
+
+    fn parseValue(self: *@This()) ParseValueError!void {
+      self.skipAny(" \t\x0B");
+      if (self.current()) |c| {
+        return switch (c) {
+          '\'' => self.parseQuotedValue('\''),
+          '"' => self.parseQuotedValue('"'),
+          else => self.parseQuotedValue(null),
+        };
+      } else return;
+    }
+
+    fn parseQuotedValue(self: *@This(), comptime quote_char: ?u8) ParseValueError!void {
+      if (quote_char) |qc| std.debug.assert(qc == self.take().?);
+
+      blk: switch (self.take()) {
+        null => {
+          if (quote_char == null) break :blk;
+
+          options.log_fn("Unexpected end of file while parsing quoted({c}) value at ", .{quote_char});
+          self.printErrorMarker();
+          return ParseValueError.UnterminatedQuote;
+        },
+        '\\' => {
+          switch (quote_char) {
+            null => switch (self.take()) {
+              null => continue :blk null,
+              '\\', '$' => |c| try self.result.append(self.allocator, c),
+              '\n' => {
+                self.line += 1;
+                self.line_start = self.at;
+                try self.result.append(self.allocator, '\n');
+              },
+              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', c}),
+            },
+            '\'' => switch (self.take()) {
+              null => continue :blk null,
+              '\\', '\'' => |c| try self.result.append(self.allocator, c),
+              '\n' => {
+                self.line += 1;
+                self.line_start = self.at;
+                try self.result.append(self.allocator, '\n');
+              },
+              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', c}),
+            },
+            '"' => switch (self.take()) {
+              null => continue :blk null,
+              '\\' => try self.result.append(self.allocator, '\\'),
+              'n' => try self.result.append(self.allocator, '\n'),
+              'r' => try self.result.append(self.allocator, '\r'),
+              't' => try self.result.append(self.allocator, '\t'),
+              'v' => try self.result.append(self.allocator, '\x0B'),
+              'f' => try self.result.append(self.allocator, '\x0C'),
+              'x' => {
+                const hexa = self.take() orelse continue :blk null;
+                const hexb = self.take() orelse continue :blk null;
+                const sum: u16 = (HEX_DECODE_ARRAY[hexa & 0x7f] << 4) + (HEX_DECODE_ARRAY[hexb & 0x7f]);
+                if (((hexa | hexb) & 0x80) == 0x80 or sum > 255) {
+                  options.log_fn("Invalid hex escape sequence `\\x{s}{s}` in quoted({c}) value at ", .{
+                    escaped(hexa) orelse self.string[self.at - 2][0..1],
+                    escaped(hexb) orelse self.string[self.at - 1][0..1],
+                    quote_char,
+                  });
+                  self.at -= if (!std.ascii.isHex(hexa)) 2 else 1;
+                  self.printErrorMarker();
+                  return ParseValueError.InvalidEscapeSequence;
+                }
+
+                try self.result.append(self.allocator, @intCast(sum));
+              },
+              '\"' => try self.result.append(self.allocator, quote_char),
+              else => |c| {
+                options.log_fn("Unexpected escape sequence `\\{s}` in quoted({c}) value at ", .{
+                  escaped(c) orelse self.currentAsSlice(), quote_char
+                });
+                self.at -= 1;
+                self.printErrorMarker();
+                return ParseValueError.InvalidEscapeSequence;
+              }
+            },
+          }
+          continue :blk self.take();
+        },
+        '$' => {
+          const next = self.take();
+          if (quote_char == '\'' or next != '{') {
+            try self.result.append(self.allocator, '$');
+            continue :blk next;
+          }
+
+          const start = self.at;
+          if (!options.is_valid_first_key_char(self.take() orelse {
+            options.log_fn("Unexpected end of file while parsing {{}} in a quoted({c}) value at ", .{quote_char});
+            self.printErrorMarker();
+            return ParseValueError.UnterminatedSubstitutionBlock;
+          })) {
+            self.at -= 1;
+            options.log_fn("Invalid first character `{s}` for key at ", .{escaped(self.current().?) orelse self.currentAsSlice()});
+            self.printErrorMarker();
+            return ParseKeyError.InvalidFirstKeyChar;
+          }
+
+          while (self.current()) |c| {
+            if (c == '}') break;
+            if (!options.is_valid_key_char(c)) {
+              options.log_fn("Invalid character `{c}` while parsing key at ", .{c});
+              self.printErrorMarker();
+              return ParseKeyError.InvalidKeyChar;
+            }
+            self.at += 1;
+          } else {
+            options.log_fn("Unexpected end of file while parsing key for {{}} in a quoted({c}) value at ", .{quote_char});
+            self.printErrorMarker();
+            return ParseValueError.UnterminatedSubstitutionBlock;
+          }
+
+          const key = self.string[start..self.at - 1];
+          const val = self.map.get(key) orelse {
+            options.log_fn("Substitution key `{s}` not found in map; at ", .{key});
+            self.at = start;
+            self.printErrorMarker();
+            return ParseValueError.SubstitutionKeyNotFound;
+          };
+
+          try self.result.appendSlice(self.allocator, val);
+        },
+        else => |c| {
+          if (c == quote_char) break :blk;
+          if (c == '\n') {
+            self.line += 1;
+            self.line_start = self.at;
+          }
+          try self.result.append(self.allocator, c);
+          continue :blk self.take();
+        },
+      }
+
+      self.skipAny(" \t\x0B");
+      const c = self.current() orelse return;
+      if (c != '#') {
+        options.log_fn("Unexpected character `{c}` in quoted({c}) value at ", .{c, quote_char});
+        self.printErrorMarker();
+        return ParseValueError.UnexpectedCharacter;
+      }
+
+      self.skipUpto('\n');
+      _ = self.take();
+    }
+
+    const ParseResult = if (in_comptime) options.map_type_comptime else GetEnvType(options.map_type);
+    fn parse(data: []const u8, allocator: if (in_comptime) void else std.mem.Allocator) ParseValueError!ParseResult {
+      var self: @This() = .{
+        .string = data,
+        .allocator = allocator,
+      };
+
+      errdefer self.deinit();
+
+      while (!self.done()) {
+        const key = try self.parseKey() orelse break;
+        try self.result.appendSlice(self.allocator, key);
+        try self.parseValue();
+      }
+
+      const freeable_data = if (in_comptime) {} else try self.result.toOwnedSlice(self.allocator);
+
+      return if (in_comptime) self.map else .{ .map = self.map, ._freeable_data = freeable_data };
+    }
+
+    fn deinit(self: *@This()) void {
+      if (!in_comptime) {
+        self.result.deinit(self.allocator);
+        self.map.deinit(self.allocator);
+      }
+    }
+  };
+}
+
+//------
+// Tests
+//------
+
+test loadFromComptime {
+
+  @setEvalBranchQuota(1000_000);
+  const parsed = comptime loadFromComptime("test.env", .{});
+  try std.testing.expectEqualStrings("b", parsed.get("a").?);
+  try std.testing.expectEqualStrings("d", parsed.get("c").?);
+  try std.testing.expectEqualStrings("f", parsed.get("3").?);
+  std.debug.assert(null == parsed.get("4"));
+  std.debug.assert(null == parsed.get("5"));
+  std.debug.assert(false);
+}
+
+test loadFrom {
+  var parsed = try loadFrom("src/test.env", std.testing.allocator, .{});
+  defer parsed.deinit(std.testing.allocator);
+
+  std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
+  std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
+  std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
+  std.debug.assert(null == parsed.get("4"));
+  std.debug.assert(null == parsed.get("5"));
+  std.debug.assert(3 == parsed.map.count());
 }
 
