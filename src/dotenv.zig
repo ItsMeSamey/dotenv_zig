@@ -104,8 +104,10 @@ const EnvType = struct {
   // }
   /// deinit the map and free any data that needs to be freed
   pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    allocator.free(self._freeable_data);
     self.map.deinit(allocator);
+    allocator.free(self._freeable_data);
+    self.map = undefined;
+    self._freeable_data = undefined;
   }
 
   const Entry = struct {
@@ -382,7 +384,7 @@ fn GetParser(options: ParseOptions) type {
     }
 
     fn trimResultEnd(self: *@This()) void {
-      while (self.result.items.len > 0 and isOneOf(self.result.items[self.result.items.len - 1], " \t\x0B")) {
+      while (self.result.items.len > 0 and isOneOf(self.result.items[self.result.items.len - 1], " \t\x0B\r\x0C")) {
         self.result.items.len -= 1;
       }
     }
@@ -446,6 +448,7 @@ fn GetParser(options: ParseOptions) type {
 
                 try self.result.append(self.allocator, @intCast((decodeHex(hexa) << 4) | decodeHex(hexb)));
               },
+              '$' => try self.result.append(self.allocator, '$'),
               '\"' => try self.result.append(self.allocator, '"'),
               else => |c_u9| {
                 const c: u8 = @intCast(c_u9);
@@ -829,4 +832,192 @@ test "unexpected character after key" {
   ;
   const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
   try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
+}
+
+test "duplicate keys overwrite with last value" {
+  const test_data =
+    \\ KEY=first
+    \\ KEY=second
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("second", parsed.get("KEY").?);
+}
+
+test "windows line endings are handled" {
+  const test_data = "KEY=value\r\nKEY2= value2 \r\n";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
+  try std.testing.expectEqualStrings("value2", parsed.get("KEY2").?);
+}
+
+test "double quotes expand carriage return escape" {
+  const test_data =
+    \\ KEY="va\rl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "va" ++ &[_]u8{'\r'} ++ "l";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "double quotes expand tab escape" {
+  const test_data =
+    \\ KEY="va\tl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "va" ++ &[_]u8{'\t'} ++ "l";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "double quotes expand vertical tab escape" {
+  const test_data =
+    \\ KEY="va\vl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "va" ++ &[_]u8{'\x0B'} ++ "l";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "double quotes expand form feed escape" {
+  const test_data =
+    \\ KEY="va\fl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "va" ++ &[_]u8{'\x0C'} ++ "l";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "unterminated substitution block" {
+  const test_data =
+    \\ KEY=${UNTERMINATED
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.UnterminatedSubstitutionBlock, err);
+}
+
+test "substitution key with invalid character" {
+  const test_data =
+    \\ KEY=valid
+    \\ URL=http://${KEY!}
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
+}
+
+test "empty substitution key" {
+  const test_data =
+    \\ KEY=${}
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidFirstKeyChar, err);
+}
+
+test "value ends with newline in unquoted" {
+  const test_data = 
+    \\KEY=value\n
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("value\\n", parsed.get("KEY").?);
+}
+
+test "inline comment without space is parsed" {
+  const test_data =
+    \\ KEY=val#comment
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
+}
+
+test "quoted values preserve trailing spaces" {
+  const test_data =
+    \\ KEY="val "
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val ", parsed.get("KEY").?);
+}
+
+test "single quotes handle escaped single quote" {
+  const test_data =
+    \\ KEY='va\'l'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va'l", parsed.get("KEY").?);
+}
+
+test "double quotes handle hex escape with lowercase" {
+  const test_data =
+    \\ KEY="val\xffue"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val\xFFue", parsed.get("KEY").?);
+}
+
+test "single quotes does not parse hex char" {
+  const test_data =
+    \\ KEY='val\xg12'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val\\xg12", parsed.get("KEY").?);
+}
+
+test "double quotes escaped dollar" {
+  const test_data =
+    \\ KEY="va\${l}"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va${l}", parsed.get("KEY").?);
+}
+
+test "substitution in multiline double quotes" {
+  const test_data =
+    \\ HOST=world
+    \\ KEY="Multi
+    \\${HOST}
+    \\line"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "Multi\nworld\nline";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "whitespace only lines are skipped" {
+  const test_data = "   \t \nKEY=value";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
+}
+
+test "unquoted value with tab trims" {
+  const test_data = "KEY=\tval\t";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
+}
+
+test "quoted value with interior tab preserved" {
+  const test_data = "KEY=\"va\tl\"";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "va\tl";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "trailing newline in file" {
+  const test_data = "KEY=value\n";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
 }
