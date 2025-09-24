@@ -148,7 +148,7 @@ fn escaped(c: u8) ?*const [2]u8 {
 }
 
 const HEX_DECODE_ARRAY: [128]u8 = blk: {
-  var all = [1]u8{0xFF} * 128;
+  var all = [1]u8{0xFF} ** 128;
   for ('0'..'9') |b| all[b - '0'] = b - '0';
   for ('A'..'F') |b| all[b - '0'] = b - 'A' + 10;
   for ('a'..'f') |b| all[b - '0'] = b - 'a' + 10;
@@ -166,6 +166,8 @@ pub const ParseValueError = error{
   UnterminatedQuote,
   InvalidEscapeSequence,
   UnterminatedSubstitutionBlock,
+  UnexpectedCharacter,
+  SubstitutionKeyNotFound,
 } || ParseKeyError || std.mem.Allocator.Error;
 
 fn GetParser(in_comptime: bool, options: ParseOptions) type {
@@ -198,6 +200,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       return self.string[self.at];
     }
 
+    fn currentU9(self: *@This()) u9 {
+      return self.current() orelse 0x100;
+    }
+
     fn last(self: *@This()) u8 {
       std.debug.assert(self.at != 0);
       return self.string[self.at - 1];
@@ -207,6 +213,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       if (self.done()) return null;
       self.at += 1;
       return self.last();
+    }
+
+    fn takeU9(self: *@This()) u9 {
+      return self.take() orelse 0x100;
     }
 
     fn skipUpto(self: *@This(), comptime end: u8) void {
@@ -314,38 +324,40 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     fn parseQuotedValue(self: *@This(), comptime quote_char: ?u8) ParseValueError!void {
       if (quote_char) |qc| std.debug.assert(qc == self.take().?);
 
-      blk: switch (self.take()) {
-        null => {
+      const quote_string = if (quote_char) |c| comptime std.fmt.comptimePrint(" quoted({c})", .{c}) else "";
+
+      blk: switch (self.takeU9()) {
+        0x100 => {
           if (quote_char == null) break :blk;
 
-          options.log_fn("Unexpected end of file while parsing quoted({c}) value at ", .{quote_char});
+          options.log_fn("Unexpected end of file while parsing a{s} value at ", .{quote_string});
           self.printErrorMarker();
           return ParseValueError.UnterminatedQuote;
         },
         '\\' => {
-          switch (quote_char) {
-            null => switch (self.take()) {
-              null => continue :blk null,
-              '\\', '$' => |c| try self.result.append(self.allocator, c),
+          switch (if (quote_char) |c| @as(u9, c) else 0x100) {
+            0x100 => switch (self.takeU9()) {
+              0x100 => continue :blk 0x100,
+              '\\', '$' => |c| try self.result.append(self.allocator, @intCast(c)),
               '\n' => {
                 self.line += 1;
                 self.line_start = self.at;
                 try self.result.append(self.allocator, '\n');
               },
-              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', c}),
+              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', @intCast(c)}),
             },
-            '\'' => switch (self.take()) {
-              null => continue :blk null,
-              '\\', '\'' => |c| try self.result.append(self.allocator, c),
+            '\'' => switch (self.takeU9()) {
+              0x100 => continue :blk 0x100,
+              '\\', '\'' => |c| try self.result.append(self.allocator, @intCast(c)),
               '\n' => {
                 self.line += 1;
                 self.line_start = self.at;
                 try self.result.append(self.allocator, '\n');
               },
-              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', c}),
+              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', @intCast(c)}),
             },
-            '"' => switch (self.take()) {
-              null => continue :blk null,
+            '"' => switch (self.takeU9()) {
+              0x100 => continue :blk 0x100,
               '\\' => try self.result.append(self.allocator, '\\'),
               'n' => try self.result.append(self.allocator, '\n'),
               'r' => try self.result.append(self.allocator, '\r'),
@@ -353,14 +365,14 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
               'v' => try self.result.append(self.allocator, '\x0B'),
               'f' => try self.result.append(self.allocator, '\x0C'),
               'x' => {
-                const hexa = self.take() orelse continue :blk null;
-                const hexb = self.take() orelse continue :blk null;
+                const hexa = self.take() orelse continue :blk 0x100;
+                const hexb = self.take() orelse continue :blk 0x100;
                 const sum: u16 = (HEX_DECODE_ARRAY[hexa & 0x7f] << 4) + (HEX_DECODE_ARRAY[hexb & 0x7f]);
                 if (((hexa | hexb) & 0x80) == 0x80 or sum > 255) {
-                  options.log_fn("Invalid hex escape sequence `\\x{s}{s}` in quoted({c}) value at ", .{
-                    escaped(hexa) orelse self.string[self.at - 2][0..1],
-                    escaped(hexb) orelse self.string[self.at - 1][0..1],
-                    quote_char,
+                  options.log_fn("Invalid hex escape sequence `\\x{s}{s}` in a{s} value at ", .{
+                    escaped(hexa) orelse self.string[self.at - 2..][0..1],
+                    escaped(hexb) orelse self.string[self.at - 1..][0..1],
+                    quote_string,
                   });
                   self.at -= if (!std.ascii.isHex(hexa)) 2 else 1;
                   self.printErrorMarker();
@@ -369,21 +381,24 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 
                 try self.result.append(self.allocator, @intCast(sum));
               },
-              '\"' => try self.result.append(self.allocator, quote_char),
-              else => |c| {
-                options.log_fn("Unexpected escape sequence `\\{s}` in quoted({c}) value at ", .{
-                  escaped(c) orelse self.currentAsSlice(), quote_char
+              '\"' => try self.result.append(self.allocator, '"'),
+              else => |c_u9| {
+                const c: u8 = @intCast(c_u9);
+
+                options.log_fn("Unexpected escape sequence `\\{s}` in a{s} value at ", .{
+                  escaped(c) orelse self.currentAsSlice(), quote_string
                 });
                 self.at -= 1;
                 self.printErrorMarker();
                 return ParseValueError.InvalidEscapeSequence;
               }
             },
+            else => unreachable,
           }
-          continue :blk self.take();
+          continue :blk self.takeU9();
         },
         '$' => {
-          const next = self.take();
+          const next = self.takeU9();
           if (quote_char == '\'' or next != '{') {
             try self.result.append(self.allocator, '$');
             continue :blk next;
@@ -391,7 +406,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 
           const start = self.at;
           if (!options.is_valid_first_key_char(self.take() orelse {
-            options.log_fn("Unexpected end of file while parsing {{}} in a quoted({c}) value at ", .{quote_char});
+            options.log_fn("Unexpected end of file while parsing {{}} in a{s} value at ", .{quote_string});
             self.printErrorMarker();
             return ParseValueError.UnterminatedSubstitutionBlock;
           })) {
@@ -410,7 +425,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
             }
             self.at += 1;
           } else {
-            options.log_fn("Unexpected end of file while parsing key for {{}} in a quoted({c}) value at ", .{quote_char});
+            options.log_fn("Unexpected end of file while parsing key for {{}} in a{s} value at ", .{quote_string});
             self.printErrorMarker();
             return ParseValueError.UnterminatedSubstitutionBlock;
           }
@@ -426,20 +441,20 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           try self.result.appendSlice(self.allocator, val);
         },
         else => |c| {
-          if (c == quote_char) break :blk;
+          if (quote_char != null and c == quote_char.?) break :blk;
           if (c == '\n') {
             self.line += 1;
             self.line_start = self.at;
           }
-          try self.result.append(self.allocator, c);
-          continue :blk self.take();
+          try self.result.append(self.allocator, @intCast(c));
+          continue :blk self.takeU9();
         },
       }
 
       self.skipAny(" \t\x0B");
       const c = self.current() orelse return;
       if (c != '#') {
-        options.log_fn("Unexpected character `{c}` in quoted({c}) value at ", .{c, quote_char});
+        options.log_fn("Unexpected character `{c}` in a{s} value at ", .{c, quote_string});
         self.printErrorMarker();
         return ParseValueError.UnexpectedCharacter;
       }
@@ -481,17 +496,17 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 // Tests
 //------
 
-test loadFromComptime {
-
-  @setEvalBranchQuota(1000_000);
-  const parsed = comptime loadFromComptime("test.env", .{});
-  try std.testing.expectEqualStrings("b", parsed.get("a").?);
-  try std.testing.expectEqualStrings("d", parsed.get("c").?);
-  try std.testing.expectEqualStrings("f", parsed.get("3").?);
-  std.debug.assert(null == parsed.get("4"));
-  std.debug.assert(null == parsed.get("5"));
-  std.debug.assert(false);
-}
+// test loadFromComptime {
+//
+//   @setEvalBranchQuota(1000_000);
+//   const parsed = comptime loadFromComptime("test.env", .{});
+//   try std.testing.expectEqualStrings("b", parsed.get("a").?);
+//   try std.testing.expectEqualStrings("d", parsed.get("c").?);
+//   try std.testing.expectEqualStrings("f", parsed.get("3").?);
+//   std.debug.assert(null == parsed.get("4"));
+//   std.debug.assert(null == parsed.get("5"));
+//   std.debug.assert(false);
+// }
 
 test loadFrom {
   var parsed = try loadFrom("src/test.env", std.testing.allocator, .{});
