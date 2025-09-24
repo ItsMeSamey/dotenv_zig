@@ -1,8 +1,11 @@
-# dotenv_zig
-Load ENV vars from `.env` file 
-
-This library provides functions for loading environment variables from `.env` files at both compile time and runtime. It supports unquoting and unescaping of string values and offers flexible options for whitespace handling.
+# dotenv
+Load ENV vars from `.env` file.
 Supports zig `0.14.0`, `0.14.1` and `0.15.1`.
+
+This library provides functions for loading environment variables from `.env` files at runtime.
+It supports unquoting and unescaping of string values (including substitutions like `${VAR}`), comments, multiline values, and flexible customization via `ParseOptions`.
+
+This library provides functions for loading and parsing environment variables from `.env` files at runtime.
 
 ## Installation
 
@@ -19,28 +22,10 @@ exe.root_module.addImport("dotenv", dotenv.module("dotenv"));
 
 ## 🚨🚨 Microlibrary 🚨🚨
 
-This is a microlibrary. The code is mostly straightforward. Consider simply copying `dotenv.zig` directly into your project instead of adding a dependency. It's only about 250 lines of code . The choice is yours.
+This is a microlibrary. The code is mostly straightforward. Consider simply copying `dotenv.zig` directly into your project instead of adding a dependency.
+It's only about 1k lines of code (including tests). The choice is yours.
 
 ## Usage
-
-### Compile-time Usage
-
-```zig
-const std = @import("std");
-const dotenv = @import("dotenv");
-
-// Load and parse the .env file at compile time.
-const parsed = comptime dotenv.loadEnvComptime(".env", .{});
-
-pub fn main() !void {
-  // Access individual values.
-  if (parsed.get("MY_VARIABLE")) |value| {
-    std.debug.print("MY_VARIABLE: {s}\n", .{value});
-  }
-}
-```
-
-### Runtime Usage
 
 ```zig
 const std = @import("std");
@@ -48,41 +33,32 @@ const dotenv = @import("dotenv");
 
 pub fn main() !void {
   var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+  defer _ = gpa.deinit();
   const allocator = gpa.allocator();
-  defer gpa.deinit();
 
   // Load and parse the .env file at runtime.
-  var env = try dotenv.loadEnvRuntime(".env", allocator, .{});
-  defer env.deinit();
+  var env = try dotenv.load(allocator, .{}); // Defaults to .env
+  defer env.deinit(allocator);
 
   // Access individual values.
   if (env.get("MY_VARIABLE")) |value| {
     std.debug.print("MY_VARIABLE: {s}\n", .{value});
   }
-
-  // Example of setting/overriding a value:
-  try env.put("NEW_VAR", "new_value");
 }
 ```
 
-### Iterating over environment variables (Compile-time)
+You can also load from a specific file or raw data:
 
 ```zig
-const std = @import("std");
-const dotenv = @import("dotenv.zig");
+// From a specific file.
+var env = try dotenv.loadFrom("custom.env", allocator, .{});
 
-// This is embedded into the executable itself, no .env needed at runtime
-const parsed = comptime dotenv.loadEnvComptime(".env", .{});
-
-pub fn main() !void {
-  // Print all the values in the map
-  for (0..parsed.kvs.len) |i| {
-    std.debug.print("{s}={s}\n", .{ parsed.kvs.keys[i], parsed.kvs.values[i] });
-  }
-}
+// From raw data (e.g., embedded or read elsewhere).
+const raw_data = "MY_VAR=value\n";
+var env = try dotenv.loadFromData(raw_data, allocator, .{});
 ```
 
-### Iterating over environment variables (Runtime)
+### Iterating over Environment Variables
 
 ```zig
 const std = @import("std");
@@ -90,41 +66,234 @@ const dotenv = @import("dotenv");
 
 pub fn main() !void {
   var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+  defer _ = gpa.deinit();
   const allocator = gpa.allocator();
-  defer gpa.deinit();
 
-  var env = try dotenv.loadEnvRuntime(".env", allocator, .{});
-  defer env.deinit();
+  var env = try dotenv.load(allocator, .{});
+  defer env.deinit(allocator);
 
-  var iter = env.map.iterator();
-  while (iter.next()) |kvp| {
-    std.debug.print("{s}={s}\n", .{ kvp.key_ptr.*, kvp.value_ptr.* });
+  var iter = env.iterator();
+  while (iter.next()) |entry| {
+    std.debug.print("{s}={s}\n", .{ entry.key, entry.value });
   }
 }
 ```
 
-### Unescaping and Unquoting
 
-The `UnescapeStringOptions` struct provides fine-grained control over how quoted strings are processed. You can specify whether quotes should be removed, and how whitespace should be handled.
 
 ### Error Handling
 
-Runtime functions return errors that must be handled. Compile-time errors will cause compilation to fail.
+Runtime functions return `ParseError` (including `ParseValueError`, file I/O errors).
+Use `try` or handle explicitly. Errors log details (unless disabled) with line/column numbers.
 
-### Example `.env` File
+## Example `.env` File
 
 ```
-MY_VARIABLE="my value"
-123 = 'Yes 123 can be a key too'
 # This is a comment
-ABCD = `backticks are also allowed`
-MY_NAME = firstname middlename lastname
+NOTHING=# This is also a comment, NOTHING is empty string
+NOTHING = "" # You can override values
+HOSTNAME = localhost
+PORT = 8080
+URL = http://${HOSTNAME}:${PORT} # Substitutions expand
+LITERAL = '${This Will Not Be Substituted}' # But not in single quotes
+ESCAPE_SEQUENCES = "\xff\n\r\v\f" # Escapes unescaped (only in double quotes)
+MULTILINE_VALUE = "Multi
+line# NOT A COMMENT
+    value"
 ```
 
 ## How it Works
+- **Keys**: Default key validation: First char is alphabetic or `_`; subsequent chars are alphanumeric or `_`.
+- **Parsing**: Keys/values split on first `=`.
+- **Values**: Supports unquoting and unescaping of string values (including substitutions like `${VAR}`), comments, multiline values, and flexible customization via `ParseOptions`.
 
-The comptime function parses and embeds the variables into the binary itself
+## Parsing specification
 
-The runtime loading functions read the specified `.env` file and parse each line. Lines beginning with `#` are treated as comments and ignored.  Lines containing an `=` character are split at the first occurrence of `=`, creating a key-value pair. This key-value pair is then added to the environment map. The library uses `std.process.EnvMap`. This allows for efficient lookups and modifications.
+# dotenv
+Load ENV vars from `.env` file.
+Supports zig `0.14.0`, `0.14.1` and `0.15.1`.
 
+This library provides functions for loading environment variables from `.env` files at runtime.
+It supports unquoting and unescaping of string values (including substitutions like `${VAR}`), comments, multiline values, and flexible customization via `ParseOptions`.
+
+This library provides functions for loading and parsing environment variables from `.env` files at runtime.
+
+## Installation
+
+```bash
+zig fetch --save git+https://github.com/ItsMeSamey/dotenv_zig#main
+```
+
+Then, add it to your `build.zig`:
+
+```zig
+const dotenv = b.dependency("dotenv", .{});
+exe.root_module.addImport("dotenv", dotenv.module("dotenv"));
+```
+
+## 🚨🚨 Microlibrary 🚨🚨
+
+This is a microlibrary. The code is mostly straightforward. Consider simply copying `dotenv.zig` directly into your project instead of adding a dependency.
+It's only about 1k lines of code (including tests). The choice is yours.
+
+## Usage
+
+```zig
+const std = @import("std");
+const dotenv = @import("dotenv");
+
+var env: dotenv.EnvType = undefined;
+
+pub fn main() !void {
+  var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+  defer _ = gpa.deinit();
+  const allocator = gpa.allocator();
+
+  // Load and parse the .env file at runtime.
+  env = try dotenv.load(allocator, .{});
+  defer env.deinit(allocator);
+
+  // Access individual values.
+  if (env.get("MY_VARIABLE")) |value| {
+    std.debug.print("MY_VARIABLE: {s}\n", .{value});
+  }
+}
+```
+
+You can also load from a specific file or raw data:
+
+```zig
+// From a specific file.
+var env = try dotenv.loadFrom("filename.env", allocator, .{});
+
+// From raw data (e.g., embedded or read elsewhere).
+const raw_data = "MY_VAR=value\n";
+var env = try dotenv.loadFromData(raw_data, allocator, .{});
+```
+
+### Iterating over Environment Variables
+
+```zig
+const std = @import("std");
+const dotenv = @import("dotenv");
+
+pub fn main() !void {
+  var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+  defer _ = gpa.deinit();
+  const allocator = gpa.allocator();
+
+  var env = try dotenv.load(allocator, .{});
+  defer env.deinit(allocator);
+
+  var iter = env.iterator();
+  while (iter.next()) |entry| {
+    std.debug.print("{s}={s}\n", .{ entry.key, entry.value });
+  }
+}
+```
+
+### Error Handling
+
+Runtime functions return `ParseError` (including `ParseValueError`, file I/O errors).
+Use `try` or handle explicitly. Errors log details (unless disabled) with line/column numbers.
+
+## Example `.env` File
+
+```
+# This is a comment
+NOTHING=# This is also a comment, NOTHING is empty string
+NOTHING = "" # You can override values
+HOSTNAME = localhost
+PORT = 8080
+URL = http://${HOSTNAME}:${PORT} # Substitutions expand
+LITERAL = '${This Will Not Be Substituted}' # But not in single quotes
+ESCAPE_SEQUENCES = "\xff\n\r\v\f" # Escapes unescaped (only in double quotes)
+MULTILINE_VALUE = "Multi
+line# NOT A COMMENT
+    value"
+```
+
+## How it Works
+- **Keys**: Default key validation: First char is alphabetic or `_`; subsequent chars are alphanumeric or `_`.
+- **Parsing**: Keys/values split on first `=`.
+- **Values**: Supports unquoting and unescaping of string values (including substitutions like `${VAR}`), comments, multiline values, and flexible customization via `ParseOptions`.
+- **Verbose Errors**: Detailed logging is provided iff there is a parsing error. The logging can be disabled by specifying `.{ .log_fn = ParseOptions.NopLogFn }`.
+
+## Parsing specification
+
+The parser follows a specification inspired by common `.env` formats (e.g., dotenv), with extensions for Zig efficiency.
+It processes the file line-by-line but supports multiline quoted values. Whitespace includes spaces, tabs, vertical tabs (`\v`), form feeds (`\f`), and carriage returns (`\r`). Newlines (`\n` or `\r\n`) advance the line counter.
+
+### General Rules
+- **Comments**: Lines starting with `#` (after leading whitespace) are ignored. Inline `#` after a value, and outside of any quotes starts a comment to the end of the line.
+- **Key-Value Pairs**: Split on the first `=` (after key). Duplicate keys are overwritten with the last value.
+- **Positions**: Errors report 1-based line and column numbers, with a caret (`^`) marker and up to 100 chars of context (configurable via `max_error_line_peek`).
+- **Encoding**: supports UTF-8 as bytes (no validation or normalization).
+- **Windows Line Endings**: supported; `\r\n` treated as newline.
+
+### Keys
+- **Format**: `KEY=VALUE` (spaces around `=` optional, trimmed).
+- **Validation**: (customizable via `is_valid_first_key_char_fn` and `is_valid_key_char_fn`):
+  - **Defaults**
+    - First character: Alphabetic (`a-zA-Z`) or `_`.
+    - Subsequent characters: Alphanumeric (`a-zA-Z0-9`) or `_`.
+- **Errors**: see comments for eash specific error in the source.
+
+### Values
+Values start after `=` (leading whitespace trimmed). Parsing mode determined by first non-whitespace char:
+- Unquoted (no quote): `\` is used to escape itself and `${`(substitution block). That is `\\` will parse to `\` and `\${VAR}` will not be substituted.
+- Single-quoted (`'`): `\` is used to escape itself and `'` (single quote). That is `\\` will parse to `\` and `\'` will parse to `'`.
+- Double-quoted (`"`): `\` is used to escape itself, `"` (double quote) and the following escape sequences:
+  - **`\n`**: newline.
+  - **`\r`**: carriage return.
+  - **`\t`**: tab.
+  - **`\v`**: vertical tab.
+  - **`\f`**: form feed.
+  - **`\xHH`**: hex byte (`H` = `0-9a-fA-F`; errors if invalid/partial).
+  - **`\${...}`**: substitution block.
+  Other escape sequences generate errors (this is not the case for unquoted / single-quoted values).
+
+- Starting with `#`: Empty value (inline comment).
+- EOF/Newline: Empty value.
+
+Trailing whitespace after value is trimmed, to preserve whitespace, use quoted values.
+`#` starts an inline comment, if you need a `#` in a value, use quoted values.
+
+#### Quoted Values
+- **Multiline**: Continues across lines until closing quote (newlines preserved as `\n`).
+- **Inline `#`**: Ignored inside quotes (not a comment).
+- **Closing**: Trailing whitespace/comments after closing quote ignored.
+
+### Substitutions (`${KEY}`)
+- Only in double-quoted or unquoted values.
+- `KEY` follows key rules (alphabetic/`_` first, alphanumeric/`_` after).
+- Expands to value of prior `KEY` (forward-only, no recursion).
+- Single quotes: Literal `${KEY}`.
+
+> [!NOTE]
+> unlike bash, only "${VAR}" is substituted, "$VAR" is kept as-is.
+
+### Logging and Customization
+- **Logging**: Via `log_fn` (default: `std.debug.print`; `NopLogFn` disables). Logs errors with context.
+- **Validation**: Custom `is_valid_first_key_char_fn`/`is_valid_key_char_fn` (self-referential, log on invalid).
+- **Peek**: `max_error_line_peek` limits error context.
+
+### Edge Cases (from Tests)
+| Case | Behavior | Example |
+|------|----------|---------|
+| Empty file | Empty map | `""` → `{}` |
+| Only comments/whitespace | Empty map | `# comment\n  \n` → `{}` |
+| Empty value | `""` | `KEY=` → `""` |
+| Trailing newline | Ignored | `KEY=value\n` → `"value"` |
+| Duplicate keys | Last wins | `KEY=first\nKEY=second` → `"second"` |
+| Inline comment (no space) | Value until `#` | `KEY=val#comment` → `"val"` |
+| Escaped quote (single) | Preserved | `'va\'l'` → `"va'l"` |
+| Hex escape (double) | Decoded | `"\xFF"` → byte `0xFF` |
+| Partial hex | Error | `"\xG"` → `InvalidEscapeSequence` |
+| UTF-8/Emoji | Preserved as bytes | `"Hello 😊"` → bytes |
+| Export prefix | Invalid key | `export KEY=value` → `InvalidKeyChar` |
+| Multiple `=` in value | Preserved | `KEY=val=more` → `"val=more"` |
+| Value ending `\` (unquoted) | Literal | `KEY=val\` → `"val\\"` (only one `\`) |
+| Value ending `\` (unquoted) | Literal | `KEY=val\\` → `"val\\"` (only one `\`) |
+| Value ending `\` (unquoted) | Literal | `KEY=val\\\` → `"val\\\\"` (2 `\`) |
 
