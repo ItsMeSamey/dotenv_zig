@@ -1252,4 +1252,3 @@ test "unquoted value with Japanese" {
   defer parsed.deinit(std.testing.allocator);
   try std.testing.expectEqualStrings("こんにちは", parsed.get("KEY").?);
 }
-
