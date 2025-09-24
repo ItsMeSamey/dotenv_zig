@@ -531,10 +531,20 @@ fn GetParser(options: ParseOptions) type {
             return;
           }
           if (quote_char != null and c == quote_char.?) break :blk;
-          if (c == '\n') {
-            self.line += 1;
-            self.line_start = self.at;
-          }
+
+          // if (options.utf8) {
+          //   if (std.unicode.utf8ByteSequenceLength(c)) |utflen| {
+          //     if (self.at + utflen >= self.string.len) {
+          //       options.log_fn("Unexpected end of file while parsing a{s} unicode value at ", .{quote_string});
+          //       self.printErrorMarker();
+          //       return ParseValueError.UnexpectedEndOfFile;
+          //     }
+          //     try self.result.appendSlice(self.allocator, self.string[self.at-1..][0..utflen]);
+          //     self.at += utflen - 1;
+          //     continue :blk self.takeU9();
+          //   }
+          // }
+
           try self.result.append(self.allocator, @intCast(c));
           continue :blk self.takeU9();
         },
@@ -1154,13 +1164,92 @@ test "hex escape at end of value" {
   try std.testing.expectEqualStrings("val\xFF", parsed.get("KEY").?);
 }
 
-// TODO: add utf8 support
-// test "UTF-8 key and value" {
-//   const test_data =
-//     \\ KEY_ café=value_ café
-//   ;
-//   var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
-//   defer parsed.deinit(std.testing.allocator);
-//   try std.testing.expect(std.mem.eql(u8, "value_ café", parsed.get("KEY_ café").?));
-// }
+test "unexpected characters after quoted value" {
+  const test_data = "KEY=\"value\" extra";
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.UnexpectedCharacter, err);
+}
+
+test "unquoted value with accented characters" {
+  const test_data =
+    \\ KEY=café
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("café", parsed.get("KEY").?);
+}
+
+test "double quoted value with emoji" {
+  const test_data =
+    \\ KEY="Hello 😊 World"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("Hello 😊 World", parsed.get("KEY").?);
+}
+
+test "single quoted value with Chinese characters" {
+  const test_data =
+    \\ KEY='你好世界'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("你好世界", parsed.get("KEY").?);
+}
+
+test "unquoted value with Cyrillic" {
+  const test_data =
+    \\ KEY=Привет
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("Привет", parsed.get("KEY").?);
+}
+
+test "double quoted value with Arabic" {
+  const test_data =
+    \\ KEY="مرحبا بالعالم"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("مرحبا بالعالم", parsed.get("KEY").?);
+}
+
+test "unquoted value with mixed UTF-8 and ASCII, interior em space" {
+  const test_data =
+    \\ KEY=café world  # em space interior
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("café world", parsed.get("KEY").?);
+}
+
+test "substitution expands to UTF-8 value" {
+  const test_data =
+    \\ GREETING=Hola
+    \\ PLACE=México
+    \\ MSG=${GREETING} desde ${PLACE}!
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("Hola desde México!", parsed.get("MSG").?);
+}
+
+test "double quoted value with trailing zero-width space trimmed" {
+  const test_data =
+    \\ KEY="test"  # zero-width space
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("test", parsed.get("KEY").?);
+}
+
+test "unquoted value with Japanese" {
+  const test_data =
+    \\ KEY=こんにちは
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("こんにちは", parsed.get("KEY").?);
+}
 
