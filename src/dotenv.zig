@@ -21,12 +21,6 @@ pub const ParseOptions = struct {
   /// substitute variables inside of `${}` blocks
   substitute: bool = false,
 
-  /// the type of map to use
-  map_type: type = std.StringHashMapUnmanaged([]const u8),
-
-  /// type of map to use at comptime
-  map_type_comptime: type = std.StaticStringMap([]const u8),
-
   is_valid_first_key_char_fn: fn (self: @This(), char: u8) bool = struct {
     fn is_valid_first_key_char(self: Self, char: u8) bool {
       const is_valid = std.ascii.isAlphabetic(char) or char == '_';
@@ -43,57 +37,114 @@ pub const ParseOptions = struct {
     }
   }.is_valid_key_char,
 
+  max_error_line_peek: usize = 100,
+
   const Self = @This();
 
   pub const NopLogFn = struct {
     fn log_fn(comptime _: []const u8, _: anytype) void {}
   }.log_fn;
 
-  fn is_valid_first_key_char(self: Self, char: u8) bool {
+  pub const Istring = struct {
+    idx: u32,
+    len: u32,
+  };
+
+  fn is_valid_first_key_char(self: @This(), char: u8) bool {
     return self.is_valid_first_key_char_fn(self, char);
   }
 
-  fn is_valid_key_char(self: Self, char: u8) bool {
+  fn is_valid_key_char(self: @This(), char: u8) bool {
     return self.is_valid_key_char_fn(self, char);
   }
-};
 
-fn GetEnvType(T: type) type {
-  return struct {
-    /// The underlying string map
-    map: T,
-    /// If this is not void, this contains 
-    _freeable_data: []const u8,
-
-    /// Get the value for the given key or null if none exists
-    pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
-      return self.map.get(key);
+  /// the type of map used
+  pub const MapTypeContext = struct {
+    result: []const u8,
+    const StringContext = std.hash_map.StringContext;
+    pub fn hash(self: @This(), key: anytype) u64 {
+      if (@TypeOf(key) == Istring) {
+        return StringContext.hash(undefined, self.result[key.idx..][0..key.len]);
+      } else if (@TypeOf(key) == []const u8) {
+        return StringContext.hash(undefined, key);
+      }
+      unreachable;
     }
-    /// Put a key value pair in the map, (the key should not be mutated after this)
-    pub fn put(self: *@This(), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
-      return self.map.put(allocator, key, value);
-    }
-    /// deinit the map and free any data that needs to be freed
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-      allocator.free(self._freeable_data);
-      self.map.deinit(allocator);
-    }
-    /// Returns an iterator over entries in the map.
-    pub fn iterator(self: *const @This()) @TypeOf(self.map).Iterator {
-      return self.map.iterator();
+    pub fn eql(self: @This(), key: anytype, key2: Istring) bool {
+      const second_string = self.result[key2.idx..][0..key2.len];
+      if (@TypeOf(key) == Istring) {
+        return StringContext.eql(undefined, self.result[key.idx..][0..key.len], second_string);
+      } else if (@TypeOf(key) == []const u8) {
+        return StringContext.eql(undefined, key, second_string);
+      }
+      unreachable;
     }
   };
-}
+
+  /// The type of map's context
+  pub const MapType = std.HashMapUnmanaged(Istring, Istring, MapTypeContext, std.hash_map.default_max_load_percentage);
+
+  /// The type of map used at comptime
+  pub const MapTypeComptime = std.StaticStringMap([]const u8);
+};
+
+const EnvType = struct {
+  /// The underlying string map
+  map: ParseOptions.MapType,
+  /// If this is not void, this contains 
+  _freeable_data: []const u8,
+
+  /// Get the value for the given key or null if none exists
+  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
+    const idx = self.map.getAdapted(key, @FieldType(@TypeOf(self.map).Managed, "ctx"){ .result = self._freeable_data }) orelse return null;
+    return self._freeable_data[idx.idx..][0..idx.len];
+  }
+  // /// Put a key value pair in the map, (the key should not be mutated after this)
+  // fn put(self: *@This(), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+  //   return self.map.putContext(allocator, key, value);
+  // }
+  /// deinit the map and free any data that needs to be freed
+  pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    allocator.free(self._freeable_data);
+    self.map.deinit(allocator);
+  }
+
+  const Entry = struct {
+    key: []const u8,
+    value: []const u8,
+  };
+
+  const Iterator = struct {
+    iter: ParseOptions.MapType.Iterator,
+    data: []const u8,
+
+    pub fn next(self: *@This()) ?Entry {
+      const result = self.iter.next() orelse return null;
+      return Entry{
+        .key = self.data[result.key_ptr.idx..][0..result.key_ptr.len],
+        .value = self.data[result.value_ptr.idx..][0..result.value_ptr.len],
+      };
+    }
+  };
+
+  /// Returns an iterator over entries in the map.
+  pub fn iterator(self: *const @This()) Iterator {
+    return .{
+      .iter = self.map.iterator(),
+      .data = self._freeable_data,
+    };
+  }
+};
 
 pub const ParseError = ParseValueError || std.fs.File.OpenError || std.fs.File.ReadError;
 
 /// Read and parse the `.env` file to a HashMap
-pub fn load(allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!GetEnvType(options.map_type) {
+pub fn load(allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
   return loadFrom(".env", allocator, options);
 }
 
 /// Read and parse the provided env file to a HashMap
-pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!GetEnvType(options.map_type) {
+pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
   var file = try std.fs.cwd().openFile(file_name, .{});
   const file_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch |e| {
     file.close();
@@ -106,23 +157,23 @@ pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime op
 }
 
 /// Read and parse the `.env` file to a StaticStringMap at comptime
-pub fn loadFromData(data: [] u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!GetEnvType(options.map_type) {
+pub fn loadFromData(data: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!EnvType {
   return GetParser(false, options).parse(data, allocator);
 }
 
 // Parse `.env` file to a StaticStringMap at comptime
-pub fn loadComptime(options: ParseOptions) options.map_type_comptime {
+pub fn loadComptime(options: ParseOptions) ParseOptions.MapTypeComptime {
   return comptime loadFromComptime(".env", options);
 }
 
 // Parse the provided .env file to a StaticStringMap at comptime
-pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) options.map_type_comptime {
+pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseOptions.MapTypeComptime {
   return comptime loadFromDataComptime(@embedFile(file_name), options);
 }
 
 /// Parses the provided `file_data` string to a StaticStringMap
 /// If a parsing error occurs, a compileError is emitted
-pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) options.map_type_comptime {
+pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseOptions.MapTypeComptime {
   return comptime GetParser(true, options).parse(file_data, undefined) catch |e| @compileError(@errorName(e));
 }
 
@@ -149,9 +200,9 @@ fn escaped(c: u8) ?*const [2]u8 {
 
 const HEX_DECODE_ARRAY: [128]u8 = blk: {
   var all = [1]u8{0xFF} ** 128;
-  for ('0'..'9') |b| all[b - '0'] = b - '0';
-  for ('A'..'F') |b| all[b - '0'] = b - 'A' + 10;
-  for ('a'..'f') |b| all[b - '0'] = b - 'a' + 10;
+  for ('0'..'9') |b| all[b] = b - '0';
+  for ('A'..'F' + 1) |b| all[b] = b - 'A' + 10;
+  for ('a'..'f' + 1) |b| all[b] = b - 'a' + 10;
   break :blk all;
 };
 
@@ -159,6 +210,7 @@ const ParseKeyError = error{
   InvalidFirstKeyChar,
   InvalidKeyChar,
   UnexpectedEndOfKey,
+  UnexpectedEndOfFile,
 };
 
 pub const ParseValueError = error{
@@ -185,14 +237,14 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         self.items = self.items ++ bytes;
       }
     } else std.ArrayList(u8) = .{},
-    map: if (in_comptime) options.map_type_comptime else options.map_type = .{},
+    map: if (in_comptime) ParseOptions.MapTypeComptime else ParseOptions.MapType = .{},
 
     at: usize = 0,
     line: usize = 0,
     line_start: usize = 0,
 
     fn done(self: *@This()) bool {
-      return self.at > self.string.len;
+      return self.at >= self.string.len;
     }
 
     fn current(self: *@This()) ?u8 {
@@ -245,8 +297,11 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
 
     fn printErrorMarker(self: *@This()) void {
-      options.log_fn(":{d}:{d}\n{s}\n", .{self.line, self.at - self.line_start, self.string[self.line_start..self.at-1]});
-      for (0..self.line_start - self.at) |_| {
+      const at = self.at;
+      self.string = self.string[0.. @min(self.at + options.max_error_line_peek, self.string.len)];
+      self.skipUpto('\n');
+      options.log_fn(":{d}:{d}\n{s}\n", .{self.line, at - self.line_start, self.string[self.line_start..self.at]});
+      for (1..at - self.line_start) |_| {
         options.log_fn(" ", .{});
       }
       options.log_fn("^\n", .{});
@@ -278,27 +333,16 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         return ParseKeyError.InvalidFirstKeyChar;
       }
 
-      var end: usize = undefined;
-
       // Consume key chars untile we encounter something unexpected
-      while (self.take()) |c| {
-        if (isOneOf(c, " \t\x0B=")) {
-          end = self.at - 1;
-
-          if (c == '=') break;
-          self.skipAny(" \t\x0B");
-          const end_char = self.current() orelse continue;
-          if (end_char == '=') break;
-
-          options.log_fn("Got unexpected `{s}`, expected `=` ", .{escaped(end_char) orelse self.currentAsSlice()});
-          self.printErrorMarker();
-          return ParseKeyError.UnexpectedEndOfKey;
-        } else if (!options.is_valid_key_char(c)) {
-          self.at -= 1;
+      while (self.current()) |c| {
+        if (isOneOf(c, " \t\x0B=")) { // The key is done
+          break;
+        } else if (!options.is_valid_key_char(c)) { // Parse the key character
           options.log_fn("Invalid character `{s}` while parsing key at ", .{escaped(c) orelse self.currentAsSlice()});
           self.printErrorMarker();
           return ParseKeyError.InvalidKeyChar;
         }
+        self.at += 1;
       } else {
         options.log_fn("Unexpected end of file while parsing key at ", .{});
         self.at = start;
@@ -307,7 +351,26 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         return ParseKeyError.UnexpectedEndOfKey;
       }
 
-      return self.string[start..end];
+      const retval = self.string[start..self.at];
+      const c = self.take() orelse {
+        options.log_fn("Unexpected end of file, expected `=` ", .{});
+        self.printErrorMarker();
+        return ParseKeyError.UnexpectedEndOfFile;
+      };
+      if (c == '=') return retval;
+
+      self.skipAny(" \t\x0B");
+      const end_char = self.take() orelse {
+        options.log_fn("Unexpected end of file, expected `=` ", .{});
+        self.printErrorMarker();
+        return ParseKeyError.UnexpectedEndOfFile;
+      };
+
+      if (end_char == '=') return retval;
+
+      options.log_fn("Got unexpected `{s}`, expected `=` ", .{escaped(end_char) orelse self.currentAsSlice()});
+      self.printErrorMarker();
+      return ParseKeyError.UnexpectedEndOfKey;
     }
 
     fn parseValue(self: *@This()) ParseValueError!void {
@@ -316,6 +379,11 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         return switch (c) {
           '\'' => self.parseQuotedValue('\''),
           '"' => self.parseQuotedValue('"'),
+          '#' => {
+            self.skipUpto('\n');
+            _ = self.take();
+            return;
+          },
           else => self.parseQuotedValue(null),
         };
       } else return;
@@ -367,7 +435,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
               'x' => {
                 const hexa = self.take() orelse continue :blk 0x100;
                 const hexb = self.take() orelse continue :blk 0x100;
-                const sum: u16 = (HEX_DECODE_ARRAY[hexa & 0x7f] << 4) + (HEX_DECODE_ARRAY[hexb & 0x7f]);
+                const sum: u16 = @as(u16, HEX_DECODE_ARRAY[hexa & 0x7f] << 4) + @as(u16, HEX_DECODE_ARRAY[hexb & 0x7f]);
                 if (((hexa | hexb) & 0x80) == 0x80 or sum > 255) {
                   options.log_fn("Invalid hex escape sequence `\\x{s}{s}` in a{s} value at ", .{
                     escaped(hexa) orelse self.string[self.at - 2..][0..1],
@@ -417,7 +485,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           }
 
           while (self.current()) |c| {
-            if (c == '}') break;
+            if (c == '}') {
+              self.at += 1;
+              break;
+            }
             if (!options.is_valid_key_char(c)) {
               options.log_fn("Invalid character `{c}` while parsing key at ", .{c});
               self.printErrorMarker();
@@ -431,16 +502,31 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           }
 
           const key = self.string[start..self.at - 1];
-          const val = self.map.get(key) orelse {
+          const val = self.map.getAdapted(key, ParseOptions.MapTypeContext{ .result = self.result.items }) orelse {
             options.log_fn("Substitution key `{s}` not found in map; at ", .{key});
             self.at = start;
             self.printErrorMarker();
             return ParseValueError.SubstitutionKeyNotFound;
           };
 
-          try self.result.appendSlice(self.allocator, val);
+          try self.result.appendSlice(self.allocator, self.result.items[val.idx..][0..val.len]);
+          continue :blk self.takeU9();
+        },
+        '\n' => {
+          self.line += 1;
+          self.line_start = self.at;
+          if (quote_char == null) return;
+          try self.result.append(self.allocator, '\n');
+          continue :blk self.takeU9();
         },
         else => |c| {
+          if (quote_char) |qc| {
+            if (c == qc) break :blk;
+          } else if (isOneOf(@intCast(c), " \t\x0B")) {
+            break :blk;
+          } else if (c == '#') {
+            self.skipUpto('\n');
+          }
           if (quote_char != null and c == quote_char.?) break :blk;
           if (c == '\n') {
             self.line += 1;
@@ -451,8 +537,9 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         },
       }
 
-      self.skipAny(" \t\x0B");
+      self.skipAny(" \t\x0B\r");
       const c = self.current() orelse return;
+      if (c == '\n') return;
       if (c != '#') {
         options.log_fn("Unexpected character `{c}` in a{s} value at ", .{c, quote_string});
         self.printErrorMarker();
@@ -463,7 +550,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       _ = self.take();
     }
 
-    const ParseResult = if (in_comptime) options.map_type_comptime else GetEnvType(options.map_type);
+    const ParseResult = if (in_comptime) ParseOptions.MapTypeComptime else EnvType;
     fn parse(data: []const u8, allocator: if (in_comptime) void else std.mem.Allocator) ParseValueError!ParseResult {
       var self: @This() = .{
         .string = data,
@@ -473,9 +560,16 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       errdefer self.deinit();
 
       while (!self.done()) {
+        const key_start = self.result.items.len;
         const key = try self.parseKey() orelse break;
         try self.result.appendSlice(self.allocator, key);
+        const key_idx: ParseOptions.Istring = .{ .idx = @intCast(key_start), .len = @intCast(key.len), };
+
+        const val_start = self.result.items.len;
         try self.parseValue();
+        const val_idx: ParseOptions.Istring = .{ .idx = @intCast(val_start), .len = @intCast(self.result.items.len - val_start), };
+
+        try self.map.putContext(self.allocator, key_idx, val_idx, .{ .result = self.result.items });
       }
 
       const freeable_data = if (in_comptime) {} else try self.result.toOwnedSlice(self.allocator);
@@ -496,6 +590,22 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 // Tests
 //------
 
+const ENV_TEST_STRING_1: []const u8 = 
+  \\ # This is a comment
+  \\NOTHING=# This is also a comment so NOTHING should be an empty string
+  \\NOTHING = "" # You can override values, this is still an empty string
+  \\HOSTNAME = localhost
+  \\PORT = 8080
+  \\URL = http://${HOSTNAME}:${PORT}
+  \\FALLBACK = "${NOTHING}"
+  \\LITERAL = '${This Will Not Be Substitutes}'
+  \\ESCAPE_SEQUENCES = "\xff\n\r\v\f"
+  \\# 5 = 6 #this will cause an error if uncommented
+  \\MULTILINE_VALUE = "Multi
+  \\line
+  \\    value"
+;
+
 // test loadFromComptime {
 //
 //   @setEvalBranchQuota(1000_000);
@@ -509,14 +619,21 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 // }
 
 test loadFrom {
-  var parsed = try loadFrom("src/test.env", std.testing.allocator, .{});
+  var parsed = try loadFromData(ENV_TEST_STRING_1, std.testing.allocator, .{});
   defer parsed.deinit(std.testing.allocator);
 
-  std.debug.assert(std.mem.eql(u8, "b", parsed.get("a").?));
-  std.debug.assert(std.mem.eql(u8, "d", parsed.get("c").?));
-  std.debug.assert(std.mem.eql(u8, "f", parsed.get("3").?));
-  std.debug.assert(null == parsed.get("4"));
-  std.debug.assert(null == parsed.get("5"));
-  std.debug.assert(3 == parsed.map.count());
+  // var iter = parsed.iterator();
+  // while (iter.next()) |kv| {
+  //   std.debug.print("`{s}`: `{s}`\n", .{kv.key, kv.value});
+  // }
+
+  std.debug.assert(std.mem.eql(u8, "", parsed.get("NOTHING").?));
+  std.debug.assert(std.mem.eql(u8, "localhost", parsed.get("HOSTNAME").?));
+  std.debug.assert(std.mem.eql(u8, "8080", parsed.get("PORT").?));
+  std.debug.assert(std.mem.eql(u8, "http://localhost:8080", parsed.get("URL").?));
+  std.debug.assert(std.mem.eql(u8, "", parsed.get("FALLBACK").?));
+  std.debug.assert(std.mem.eql(u8, "${This Will Not Be Substitutes}", parsed.get("LITERAL").?));
+  std.debug.assert(std.mem.eql(u8, "\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?));
+  std.debug.assert(std.mem.eql(u8, "Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?));
 }
 
