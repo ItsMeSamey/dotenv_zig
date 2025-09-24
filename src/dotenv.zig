@@ -1,8 +1,20 @@
 const std = @import("std");
 
 pub const ParseOptions = struct {
-  /// Which logging function to use when priniting errors
-  log_fn: fn (comptime format: []const u8, args: anytype) void = struct {
+  /// The logging function to use when priniting errors
+  /// Set this to `NopLogFn` to disable logging
+  log_fn: fn (comptime format: []const u8, args: anytype) void = DefaultLogFn,
+  /// The function used to determine if the first character of a key is valid
+  is_valid_first_key_char_fn: fn (self: @This(), char: u8) bool = DefaultIsValidFirstKeyChar,
+  /// The function used to determine if any other character of a key is valid
+  is_valid_key_char_fn: fn (self: @This(), char: u8) bool = DefaultIsValidKeyChar,
+  /// How many characters to print after the point at which the error occurred in parsing
+  /// This cap is only applied if there is no newline uptile next `max_error_line_peek` characters
+  max_error_line_peek: usize = 100,
+
+  const Self = @This();
+
+  pub const DefaultLogFn = struct {
     fn log_fn(comptime format: []const u8, args: anytype) void {
       if (@inComptime()) {
         @compileLog(std.fmt.comptimePrint(format, args));
@@ -10,45 +22,61 @@ pub const ParseOptions = struct {
         std.debug.print(format, args);
       }
     }
-  }.log_fn,
-
-  /// Whether or not to unescape and unquoted the quoted strings
-  unquote_values: bool = true,
-
-  /// Whether or not to trim whitespace (whitespace inside quotes is never trimmed)
-  trim_whitespace: bool = true,
-
-  /// substitute variables inside of `${}` blocks
-  substitute: bool = false,
-
-  is_valid_first_key_char_fn: fn (self: @This(), char: u8) bool = struct {
-    fn is_valid_first_key_char(self: Self, char: u8) bool {
-      const is_valid = std.ascii.isAlphabetic(char) or char == '_';
-      if (!is_valid) self.log_fn("First character for key should be [a-zA-Z_]; got: `{c}`\n", .{char});
-      return is_valid;
-    }
-  }.is_valid_first_key_char,
-
-  is_valid_key_char_fn: fn (self: @This(), char: u8) bool = struct {
-    fn is_valid_key_char(self: Self, char: u8) bool {
-      const is_valid = std.ascii.isAlphanumeric(char) or char == '_';
-      if (!is_valid) self.log_fn("Key can only contain [a-zA-Z0-9_]; got: `{c}`\n", .{char});
-      return is_valid;
-    }
-  }.is_valid_key_char,
-
-  max_error_line_peek: usize = 100,
-
-  const Self = @This();
+  }.log_fn;
 
   pub const NopLogFn = struct {
     fn log_fn(comptime _: []const u8, _: anytype) void {}
   }.log_fn;
 
+  pub const DefaultIsValidFirstKeyChar = struct {
+    fn is_valid_first_key_char(self: Self, char: u8) bool {
+      const is_valid = std.ascii.isAlphabetic(char) or char == '_';
+      if (!is_valid) self.log_fn("First character for key should be [a-zA-Z_]; got: `{c}`\n", .{char});
+      return is_valid;
+    }
+  }.is_valid_first_key_char;
+
+  pub const DefaultIsValidKeyChar = struct {
+    fn is_valid_key_char(self: Self, char: u8) bool {
+      const is_valid = std.ascii.isAlphanumeric(char) or char == '_';
+      if (!is_valid) self.log_fn("Key can only contain [a-zA-Z0-9_]; got: `{c}`\n", .{char});
+      return is_valid;
+    }
+  }.is_valid_key_char;
+
   pub const Istring = struct {
     idx: u32,
     len: u32,
   };
+
+  /// the type of map used
+  pub const MapTypeContext = struct {
+    result: []const u8,
+    const StringContext = std.array_hash_map.StringContext;
+    pub fn hash(self: @This(), key: anytype) u32 {
+      if (@TypeOf(key) == Istring) {
+        return StringContext.hash(undefined, self.result[key.idx..][0..key.len]);
+      } else if (@TypeOf(key) == []const u8) {
+        return StringContext.hash(undefined, key);
+      }
+      unreachable;
+    }
+    pub fn eql(self: @This(), key: anytype, key2: Istring, b_index: usize) bool {
+      const second_string = self.result[key2.idx..][0..key2.len];
+      if (@TypeOf(key) == Istring) {
+        return StringContext.eql(undefined, self.result[key.idx..][0..key.len], second_string, b_index);
+      } else if (@TypeOf(key) == []const u8) {
+        return StringContext.eql(undefined, key, second_string, b_index);
+      }
+      unreachable;
+    }
+  };
+
+  /// The type of map's context
+  pub const MapType = std.ArrayHashMapUnmanaged(Istring, Istring, MapTypeContext, true);
+
+  /// The type of map used at comptime
+  pub const MapTypeComptime = std.StaticStringMap([]const u8);
 
   fn is_valid_first_key_char(self: @This(), char: u8) bool {
     return self.is_valid_first_key_char_fn(self, char);
@@ -57,35 +85,6 @@ pub const ParseOptions = struct {
   fn is_valid_key_char(self: @This(), char: u8) bool {
     return self.is_valid_key_char_fn(self, char);
   }
-
-  /// the type of map used
-  pub const MapTypeContext = struct {
-    result: []const u8,
-    const StringContext = std.hash_map.StringContext;
-    pub fn hash(self: @This(), key: anytype) u64 {
-      if (@TypeOf(key) == Istring) {
-        return StringContext.hash(undefined, self.result[key.idx..][0..key.len]);
-      } else if (@TypeOf(key) == []const u8) {
-        return StringContext.hash(undefined, key);
-      }
-      unreachable;
-    }
-    pub fn eql(self: @This(), key: anytype, key2: Istring) bool {
-      const second_string = self.result[key2.idx..][0..key2.len];
-      if (@TypeOf(key) == Istring) {
-        return StringContext.eql(undefined, self.result[key.idx..][0..key.len], second_string);
-      } else if (@TypeOf(key) == []const u8) {
-        return StringContext.eql(undefined, key, second_string);
-      }
-      unreachable;
-    }
-  };
-
-  /// The type of map's context
-  pub const MapType = std.HashMapUnmanaged(Istring, Istring, MapTypeContext, std.hash_map.default_max_load_percentage);
-
-  /// The type of map used at comptime
-  pub const MapTypeComptime = std.StaticStringMap([]const u8);
 };
 
 const EnvType = struct {
@@ -158,26 +157,26 @@ pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime op
 
 /// Read and parse the `.env` file to a StaticStringMap at comptime
 pub fn loadFromData(data: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!EnvType {
-  return GetParser(false, options).parse(data, allocator);
+  return GetParser(options).parse(data, allocator);
 }
 
+// This depends on https://github.com/ziglang/zig/issues/1291 working without the caveats
+//
 // Parse `.env` file to a StaticStringMap at comptime
-pub fn loadComptime(options: ParseOptions) ParseOptions.MapTypeComptime {
-  return comptime loadFromComptime(".env", options);
-}
-
-// Parse the provided .env file to a StaticStringMap at comptime
-pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseOptions.MapTypeComptime {
-  return comptime loadFromDataComptime(@embedFile(file_name), options);
-}
-
-/// Parses the provided `file_data` string to a StaticStringMap
-/// If a parsing error occurs, a compileError is emitted
-pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseOptions.MapTypeComptime {
-  return comptime GetParser(true, options).parse(file_data, undefined) catch |e| @compileError(@errorName(e));
-}
-
-// Rest of the parsing logic
+// pub fn loadComptime(options: ParseOptions) ParseOptions.MapTypeComptime {
+//   return comptime loadFromComptime(".env", options);
+// }
+//
+// // Parse the provided .env file to a StaticStringMap at comptime
+// pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseOptions.MapTypeComptime {
+//   return comptime loadFromDataComptime(@embedFile(file_name), options);
+// }
+//
+// /// Parses the provided `file_data` string to a StaticStringMap
+// /// If a parsing error occurs, a compileError is emitted
+// pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseOptions.MapTypeComptime {
+//   return comptime GetParser(options).parse(file_data, comptime_allocator) catch |e| @compileError(@errorName(e));
+// }
 
 fn isOneOf(c: u8, comptime chars: []const u8) bool {
   const VectorType = @Vector(chars.len, u8);
@@ -222,22 +221,12 @@ pub const ParseValueError = error{
   SubstitutionKeyNotFound,
 } || ParseKeyError || std.mem.Allocator.Error;
 
-fn GetParser(in_comptime: bool, options: ParseOptions) type {
+fn GetParser(options: ParseOptions) type {
   return struct {
     string: []const u8,
-    allocator: if (in_comptime) void else std.mem.Allocator,
-    result: if (in_comptime) struct {
-      items: []const u8 = &.{},
-
-      fn append(self: *@This(), _: void, byte: u8) !void {
-        self.appendSlice(undefined, [_]u8{byte});
-      }
-
-      fn appendSlice(self: *@This(), _: void, bytes: []const u8) !void {
-        self.items = self.items ++ bytes;
-      }
-    } else std.ArrayList(u8) = .{},
-    map: if (in_comptime) ParseOptions.MapTypeComptime else ParseOptions.MapType = .{},
+    allocator: std.mem.Allocator,
+    result: std.ArrayList(u8) = .{},
+    map: ParseOptions.MapType = .{},
 
     at: usize = 0,
     line: usize = 0,
@@ -550,8 +539,8 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       _ = self.take();
     }
 
-    const ParseResult = if (in_comptime) ParseOptions.MapTypeComptime else EnvType;
-    fn parse(data: []const u8, allocator: if (in_comptime) void else std.mem.Allocator) ParseValueError!ParseResult {
+    const ParseResult = EnvType;
+    fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!ParseResult {
       var self: @This() = .{
         .string = data,
         .allocator = allocator,
@@ -572,16 +561,14 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         try self.map.putContext(self.allocator, key_idx, val_idx, .{ .result = self.result.items });
       }
 
-      const freeable_data = if (in_comptime) {} else try self.result.toOwnedSlice(self.allocator);
+      const freeable_data = try self.result.toOwnedSlice(self.allocator);
 
-      return if (in_comptime) self.map else .{ .map = self.map, ._freeable_data = freeable_data };
+      return .{ .map = self.map, ._freeable_data = freeable_data };
     }
 
     fn deinit(self: *@This()) void {
-      if (!in_comptime) {
-        self.result.deinit(self.allocator);
-        self.map.deinit(self.allocator);
-      }
+      self.result.deinit(self.allocator);
+      self.map.deinit(self.allocator);
     }
   };
 }
@@ -606,18 +593,6 @@ const ENV_TEST_STRING_1: []const u8 =
   \\    value"
 ;
 
-// test loadFromComptime {
-//
-//   @setEvalBranchQuota(1000_000);
-//   const parsed = comptime loadFromComptime("test.env", .{});
-//   try std.testing.expectEqualStrings("b", parsed.get("a").?);
-//   try std.testing.expectEqualStrings("d", parsed.get("c").?);
-//   try std.testing.expectEqualStrings("f", parsed.get("3").?);
-//   std.debug.assert(null == parsed.get("4"));
-//   std.debug.assert(null == parsed.get("5"));
-//   std.debug.assert(false);
-// }
-
 test loadFrom {
   var parsed = try loadFromData(ENV_TEST_STRING_1, std.testing.allocator, .{});
   defer parsed.deinit(std.testing.allocator);
@@ -636,4 +611,3 @@ test loadFrom {
   std.debug.assert(std.mem.eql(u8, "\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?));
   std.debug.assert(std.mem.eql(u8, "Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?));
 }
-
