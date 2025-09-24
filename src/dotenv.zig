@@ -52,8 +52,8 @@ pub const ParseOptions = struct {
   /// the type of map used
   pub const MapTypeContext = struct {
     result: []const u8,
-    const StringContext = std.array_hash_map.StringContext;
-    pub fn hash(self: @This(), key: anytype) u32 {
+    const StringContext = std.hash_map.StringContext;
+    pub fn hash(self: @This(), key: anytype) u64 {
       if (@TypeOf(key) == Istring) {
         return StringContext.hash(undefined, self.result[key.idx..][0..key.len]);
       } else if (@TypeOf(key) == []const u8) {
@@ -61,19 +61,19 @@ pub const ParseOptions = struct {
       }
       unreachable;
     }
-    pub fn eql(self: @This(), key: anytype, key2: Istring, b_index: usize) bool {
+    pub fn eql(self: @This(), key: anytype, key2: Istring) bool {
       const second_string = self.result[key2.idx..][0..key2.len];
       if (@TypeOf(key) == Istring) {
-        return StringContext.eql(undefined, self.result[key.idx..][0..key.len], second_string, b_index);
+        return StringContext.eql(undefined, self.result[key.idx..][0..key.len], second_string);
       } else if (@TypeOf(key) == []const u8) {
-        return StringContext.eql(undefined, key, second_string, b_index);
+        return StringContext.eql(undefined, key, second_string);
       }
       unreachable;
     }
   };
 
   /// The type of map's context
-  pub const MapType = std.ArrayHashMapUnmanaged(Istring, Istring, MapTypeContext, true);
+  pub const MapType = std.HashMapUnmanaged(Istring, Istring, MapTypeContext, std.hash_map.default_max_load_percentage);
 
   /// The type of map used at comptime
   pub const MapTypeComptime = std.StaticStringMap([]const u8);
