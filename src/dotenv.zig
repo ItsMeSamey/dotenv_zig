@@ -197,18 +197,21 @@ fn escaped(c: u8) ?*const [2]u8 {
   };
 }
 
-const HEX_DECODE_ARRAY: [128]u8 = blk: {
-  var all = [1]u8{0xFF} ** 128;
-  for ('0'..'9') |b| all[b] = b - '0';
-  for ('A'..'F' + 1) |b| all[b] = b - 'A' + 10;
-  for ('a'..'f' + 1) |b| all[b] = b - 'a' + 10;
+const HEX_DECODE_ARRAY = blk: {
+  var all: ['f' - '0' + 1]u8 = undefined;
+  for ('0'..('9' + 1)) |b| all[b - '0'] = b - '0';
+  for ('A'..('F' + 1)) |b| all[b - '0'] = b - 'A' + 10;
+  for ('a'..('f' + 1)) |b| all[b - '0'] = b - 'a' + 10;
   break :blk all;
 };
+
+inline fn decodeHex(char: u8) u8 {
+  return @as([*]const u8, @ptrFromInt((@intFromPtr(&HEX_DECODE_ARRAY) - @as(usize, '0'))))[char];
+}
 
 const ParseKeyError = error{
   InvalidFirstKeyChar,
   InvalidKeyChar,
-  UnexpectedEndOfKey,
   UnexpectedEndOfFile,
 };
 
@@ -337,7 +340,7 @@ fn GetParser(options: ParseOptions) type {
         self.at = start;
         self.printErrorMarker();
 
-        return ParseKeyError.UnexpectedEndOfKey;
+        return ParseKeyError.UnexpectedEndOfFile;
       }
 
       const retval = self.string[start..self.at];
@@ -359,7 +362,7 @@ fn GetParser(options: ParseOptions) type {
 
       options.log_fn("Got unexpected `{s}`, expected `=` ", .{escaped(end_char) orelse self.currentAsSlice()});
       self.printErrorMarker();
-      return ParseKeyError.UnexpectedEndOfKey;
+      return ParseKeyError.InvalidKeyChar;
     }
 
     fn parseValue(self: *@This()) ParseValueError!void {
@@ -376,6 +379,12 @@ fn GetParser(options: ParseOptions) type {
           else => self.parseQuotedValue(null),
         };
       } else return;
+    }
+
+    fn trimResultEnd(self: *@This()) void {
+      while (self.result.items.len > 0 and isOneOf(self.result.items[self.result.items.len - 1], " \t\x0B")) {
+        self.result.items.len -= 1;
+      }
     }
 
     fn parseQuotedValue(self: *@This(), comptime quote_char: ?u8) ParseValueError!void {
@@ -424,8 +433,7 @@ fn GetParser(options: ParseOptions) type {
               'x' => {
                 const hexa = self.take() orelse continue :blk 0x100;
                 const hexb = self.take() orelse continue :blk 0x100;
-                const sum: u16 = @as(u16, HEX_DECODE_ARRAY[hexa & 0x7f] << 4) + @as(u16, HEX_DECODE_ARRAY[hexb & 0x7f]);
-                if (((hexa | hexb) & 0x80) == 0x80 or sum > 255) {
+                if (!std.ascii.isHex(hexa) or !std.ascii.isHex(hexb)) {
                   options.log_fn("Invalid hex escape sequence `\\x{s}{s}` in a{s} value at ", .{
                     escaped(hexa) orelse self.string[self.at - 2..][0..1],
                     escaped(hexb) orelse self.string[self.at - 1..][0..1],
@@ -436,7 +444,7 @@ fn GetParser(options: ParseOptions) type {
                   return ParseValueError.InvalidEscapeSequence;
                 }
 
-                try self.result.append(self.allocator, @intCast(sum));
+                try self.result.append(self.allocator, @intCast((decodeHex(hexa) << 4) | decodeHex(hexb)));
               },
               '\"' => try self.result.append(self.allocator, '"'),
               else => |c_u9| {
@@ -504,17 +512,20 @@ fn GetParser(options: ParseOptions) type {
         '\n' => {
           self.line += 1;
           self.line_start = self.at;
-          if (quote_char == null) return;
+          if (quote_char == null) {
+            self.trimResultEnd();
+            return;
+          }
           try self.result.append(self.allocator, '\n');
           continue :blk self.takeU9();
         },
         else => |c| {
           if (quote_char) |qc| {
             if (c == qc) break :blk;
-          } else if (isOneOf(@intCast(c), " \t\x0B")) {
-            break :blk;
           } else if (c == '#') {
             self.skipUpto('\n');
+            self.trimResultEnd();
+            return;
           }
           if (quote_char != null and c == quote_char.?) break :blk;
           if (c == '\n') {
@@ -526,6 +537,7 @@ fn GetParser(options: ParseOptions) type {
         },
       }
 
+      if (quote_char == null) self.trimResultEnd();
       self.skipAny(" \t\x0B\r");
       const c = self.current() orelse return;
       if (c == '\n') return;
@@ -602,12 +614,219 @@ test loadFrom {
   //   std.debug.print("`{s}`: `{s}`\n", .{kv.key, kv.value});
   // }
 
-  std.debug.assert(std.mem.eql(u8, "", parsed.get("NOTHING").?));
-  std.debug.assert(std.mem.eql(u8, "localhost", parsed.get("HOSTNAME").?));
-  std.debug.assert(std.mem.eql(u8, "8080", parsed.get("PORT").?));
-  std.debug.assert(std.mem.eql(u8, "http://localhost:8080", parsed.get("URL").?));
-  std.debug.assert(std.mem.eql(u8, "", parsed.get("FALLBACK").?));
-  std.debug.assert(std.mem.eql(u8, "${This Will Not Be Substitutes}", parsed.get("LITERAL").?));
-  std.debug.assert(std.mem.eql(u8, "\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?));
-  std.debug.assert(std.mem.eql(u8, "Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?));
+  try std.testing.expectEqualStrings("", parsed.get("NOTHING").?);
+  try std.testing.expectEqualStrings("localhost", parsed.get("HOSTNAME").?);
+  try std.testing.expectEqualStrings("8080", parsed.get("PORT").?);
+  try std.testing.expectEqualStrings("http://localhost:8080", parsed.get("URL").?);
+  try std.testing.expectEqualStrings("", parsed.get("FALLBACK").?);
+  try std.testing.expectEqualStrings("${This Will Not Be Substitutes}", parsed.get("LITERAL").?);
+  try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
+  try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
+}
+
+test "invalid first key character" {
+  const test_data =
+    \\ 1KEY=value
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidFirstKeyChar, err);
+}
+
+test "invalid key character" {
+  const test_data =
+    \\ KEY!=value
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
+}
+
+test "unterminated double quote" {
+  const test_data =
+    \\ KEY="unterminated value
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.UnterminatedQuote, err);
+}
+
+test "unterminated single quote" {
+  const test_data =
+    \\ KEY='unterminated value
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.UnterminatedQuote, err);
+}
+
+test "invalid escape sequence in double quotes" {
+  const test_data =
+    \\ KEY="val\zue"
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidEscapeSequence, err);
+}
+
+test "invalid hex escape in double quotes" {
+  const test_data =
+    \\ KEY="val\xg12"
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidEscapeSequence, err);
+}
+
+test "valid hex escape in double quotes" {
+  const test_data =
+    \\ KEY="val\xFFue"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val\xFFue", parsed.get("KEY").?);
+}
+
+test "substitution key not found" {
+  const test_data =
+    \\ KEY=${MISSING}
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.SubstitutionKeyNotFound, err);
+}
+
+test "substitution in single quotes does not expand" {
+  const test_data =
+    \\ HOST=world
+    \\ KEY='${HOST}'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("${HOST}", parsed.get("KEY").?);
+}
+
+test "substitution outside double quotes" {
+  const test_data =
+    \\ HOST=world
+    \\ KEY=unquoted${HOST}
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("unquotedworld", parsed.get("KEY").?);
+}
+
+test "empty file" {
+  const test_data = "";
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqual(@as(usize, 0), parsed.map.count());
+}
+
+test "only comments" {
+  const test_data =
+    \\ # Comment line 1
+    \\# Comment line 2
+    \\  # Comment with spaces
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqual(@as(usize, 0), parsed.map.count());
+}
+
+test "inline comment trims trailing space" {
+  const test_data =
+    \\ KEY=val # comment
+    \\ KEY2=val2   # comment with spaces
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
+  try std.testing.expectEqualStrings("val2", parsed.get("KEY2").?);
+}
+
+test "unquoted value trims leading and trailing spaces" {
+  const test_data =
+    \\ KEY= val 
+    \\ KEY2 =  va l  
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
+  try std.testing.expectEqualStrings("va l", parsed.get("KEY2").?);
+}
+
+test "unquoted value preserves interior spaces" {
+  const test_data =
+    \\ KEY=va l
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va l", parsed.get("KEY").?);
+}
+
+test "single quotes preserve escapes literally" {
+  const test_data =
+    \\ KEY='va\nl'
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va\\nl", parsed.get("KEY").?);
+}
+
+test "double quotes expand newline escape" {
+  const test_data =
+    \\ KEY="va\nl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "va" ++ &[_]u8{'\n'} ++ "l";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "double quotes handle backslash escape" {
+  const test_data =
+    \\ KEY="va\\nl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va\\nl", parsed.get("KEY").?);
+}
+
+test "double quotes handle quote escape" {
+  const test_data =
+    \\ KEY="va\"nl"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  try std.testing.expectEqualStrings("va\"nl", parsed.get("KEY").?);
+}
+
+test "multiline literal in double quotes" {
+  const test_data =
+    \\ KEY="Multi
+    \\line
+    \\  value"
+  ;
+  var parsed = try loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  defer parsed.deinit(std.testing.allocator);
+  const expected = "Multi\nline\n  value";
+  try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
+}
+
+test "export prefix not handled (parses as invalid key)" {
+  const test_data =
+    \\ export KEY=value
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
+}
+
+test "unexpected end of file in key" {
+  const test_data =
+    \\ KEY
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.UnexpectedEndOfFile, err);
+}
+
+test "unexpected character after key" {
+  const test_data =
+    \\ KEY? = value
+  ;
+  const err = loadFromData(test_data, std.testing.allocator, .{ .log_fn = ParseOptions.NopLogFn });
+  try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
 }
