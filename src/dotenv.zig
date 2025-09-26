@@ -49,35 +49,6 @@ pub const ParseOptions = struct {
     len: u32,
   };
 
-  /// the type of map used
-  pub const MapTypeContext = struct {
-    result: []const u8,
-    const StringContext = std.hash_map.StringContext;
-    pub fn hash(self: @This(), key: anytype) u64 {
-      if (@TypeOf(key) == Istring) {
-        return StringContext.hash(undefined, self.result[key.idx..][0..key.len]);
-      } else if (@TypeOf(key) == []const u8) {
-        return StringContext.hash(undefined, key);
-      }
-      unreachable;
-    }
-    pub fn eql(self: @This(), key: anytype, key2: Istring) bool {
-      const second_string = self.result[key2.idx..][0..key2.len];
-      if (@TypeOf(key) == Istring) {
-        return StringContext.eql(undefined, self.result[key.idx..][0..key.len], second_string);
-      } else if (@TypeOf(key) == []const u8) {
-        return StringContext.eql(undefined, key, second_string);
-      }
-      unreachable;
-    }
-  };
-
-  /// The type of map's context
-  pub const MapType = std.HashMapUnmanaged(Istring, []const u8, MapTypeContext, std.hash_map.default_max_load_percentage);
-
-  /// The type of map used at comptime
-  pub const ComptimeMapType = ComptimeHashMap;
-
   fn is_valid_first_key_char(self: @This(), char: u8) bool {
     return self.is_valid_first_key_char_fn(self, char);
   }
@@ -158,7 +129,7 @@ pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseV
 
 // This is taken from https://github.com/ziglang/zig/issues/1291
 pub const comptime_allocator: std.mem.Allocator = struct {
-  const allocator = .{
+  const allocator: std.mem.Allocator = .{
     .ptr = undefined,
     .vtable = &.{
       .alloc = comptimeAlloc,
@@ -191,165 +162,179 @@ pub const comptime_allocator: std.mem.Allocator = struct {
   }
 }.allocator;
 
-pub const ComptimeHashMap = struct {
+pub const HashMap = struct {
   const Self = @This();
-  const default_max_load_percentage = std.hash_map.default_max_load_percentage;
-  const alloc = comptime_allocator;
-  pub const String = packed struct{
-    idx: usize, len: usize,
-    fn hash(string: @This(), ks: []const u8) u64 { return std.hash_map.StringContext.hash(undefined, ks[string.idx..][0..string.len]); }
-    fn eql(string: @This(), other: []const u8, ks: []const u8) bool { return std.mem.eql(u8, ks[string.idx..][0..string.len], other); }
-  };
+  pub const String = packed struct{ idx: usize, len: usize };
   pub const KV = struct { key: []const u8, value: []const u8 };
+  const default_max_load_percentage = std.hash_map.default_max_load_percentage;
 
-  meta: []u8 = &.{},
-  keys_string: []const u8 = &.{},
-  values_string: []const u8 = &.{},
-  keys: []String = &.{},
-  values: []String = &.{},
+  // The keys_string
+  keys_string: []const u8,
+  // The string containing the concatenated values
+  values_string: std.ArrayList(u8) = .{},
+  // This is the start of our allocated block
+  _keys: [*]String = &.{},
+  // This comes after the keys
+  _values: [*]String = &.{},
+  // These will be at the end of our allocated block, 0 means unused.
+  _meta: [*]u8 = &.{},
+  /// Length for our keys, values, and meta arrays
   cap: usize = 0,
+  // How many elements are in use
   size: usize = 0,
+  // How many elements are available, this is used to reduce the number of instructions needed for the grow check
   available: usize = 0,
+  // The allocator that sores everything
+  allocator: std.mem.Allocator,
+  // The length of key strings
+  // NOTE: this is not the same as keys_string.len as the keys_string contains unused parts
+  keys_string_len: usize = 0,
 
-  pub fn init(init_cap: usize) Self {
+  pub inline fn keys(self: *const @This()) []String { return self._keys[0..self.cap]; }
+  pub inline fn values(self: *const @This()) []String { return self._values[0..self.cap]; }
+  pub inline fn meta(self: *const @This()) []u8 { return self._meta[0..self.cap]; }
+
+  pub fn init(keys_string: []const u8, cap: usize, allocator: std.mem.Allocator) !Self {
     @setEvalBranchQuota(1000_000);
-    const c = std.math.ceilPowerOfTwo(usize, init_cap) catch 16;
+    const c = std.math.ceilPowerOfTwo(usize, cap) catch 16;
+    const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(String), (2 * @sizeOf(String) + 1) * c);
+    @memset(mem[2 * c * @sizeOf(String)..], 0);
     return .{
-      .meta = blk: {
-        const m = alloc.alloc(u8, c) catch unreachable;
-        @memset(m, 0);
-        break :blk m;
-      },
-      .keys = alloc.alloc(String, c) catch unreachable,
-      .values = alloc.alloc(String, c) catch unreachable,
+      .keys_string = keys_string,
+      ._keys = @ptrCast(mem.ptr),
+      ._values = @ptrCast(mem[c * @sizeOf(String)..].ptr),
+      ._meta = mem[2 * c * @sizeOf(String)..].ptr,
       .cap = c,
-      .available = c * default_max_load_percentage / 100
+      .available = c * default_max_load_percentage / 100,
+      .allocator = allocator,
     };
   }
 
-  pub const Iterator = struct {
-    map: *const Self,
-    i: usize = 0,
-
-    pub fn next(it: *Iterator) ?KV {
-      if (it.i >= it.map.cap) return null;
-      while (it.i < it.map.cap) {
-        defer it.i += 1;
-        if (it.map.meta[it.i] != 0) {
-          const k = it.map.keys[it.i];
-          const v = it.map.values[it.i];
-          return .{
-            .key = it.map.keys_string[k.idx..][0..k.len],
-            .value = it.map.values_string[v.idx..][0..v.len]
-          };
-        }
-      }
-      return null;
-    }
-  };
-
-  pub fn iterator(self: *const Self) Iterator { return .{ .map = self }; }
-
-  fn getFingerprint(hash: u64) u8 {
-    const fp: u8 = @intCast(hash >> 56);
-    return if (fp == 0) 1 else fp;
-  }
-
-  pub fn get(self: Self, key: []const u8) ?[]const u8 {
-    @setEvalBranchQuota(1000_000);
+  fn getHFP(key: []const u8) std.meta.Tuple(&.{u64, u8}) {
     const h = std.hash_map.StringContext.hash(undefined, key);
-    const fp = getFingerprint(h);
-    var i: usize = @intCast(h & (self.cap - 1));
-    while (self.meta[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
-      if (self.meta[i] == fp and self.keys[i].eql(key, self.keys_string)) {
-        const v = self.values[i];
-        return self.values_string[v.idx..][0..v.len];
-      }
-    }
-    return null;
+    const fp: u8 = @intCast(h >> 56);
+    return .{h, if (fp == 0) 1 else fp};
   }
 
-  pub fn put(self: *Self, key: []const u8, value: []const u8) void {
+  fn hashString(self: *const @This(), string: String) u64 {
+    return std.hash_map.StringContext.hash(undefined, self.keys_string[string.idx..][0..string.len]);
+  }
+
+  fn eqlString(self: *const @This(), string: String, other: []const u8) bool {
+    return std.mem.eql(u8, self.keys_string[string.idx..][0..string.len], other);
+  }
+
+  fn getIndex(self: *const @This(), fingerprint: u8, hash: u64, key: []const u8) usize {
+    var i: usize = @intCast(hash & (self.cap - 1));
+    while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
+      if (self.meta()[i] == fingerprint and self.eqlString(self.keys()[i], key)) break;
+    }
+
+    return i;
+  }
+
+  pub fn get(self: *@This(), key: []const u8) ?[]const u8 {
     @setEvalBranchQuota(1000_000);
-    self.grow();
-    const h = std.hash_map.StringContext.hash(undefined, key);
-    const fp = getFingerprint(h);
-    var i: usize = @intCast(h & (self.cap - 1));
-    while (self.meta[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
-      if (self.meta[i] == fp and self.keys[i].eql(key, self.keys_string)) {
-        self.values[i] = .{ .idx = self.values_string.len, .len = value.len };
-        self.values_string = self.values_string ++ value;
-        return;
-      }
-    }
-    self.meta[i] = fp;
-    self.keys[i] = .{ .idx = self.keys_string.len, .len = key.len };
-    self.keys_string = self.keys_string ++ key;
-    self.values[i] = .{ .idx = self.values_string.len, .len = value.len };
-    self.values_string = self.values_string ++ value;
-    self.size += 1;
-    self.available -= 1;
+    const hash, const fingerprint = getHFP(key);
+    const i = self.getIndex(fingerprint, hash, key);
+    if (self.meta()[i] == 0) return null;
+    const v = self.values()[i];
+    return self.values_string.items[v.idx..][0..v.len];
   }
 
-  fn grow(self: *Self) void {
+  pub fn put(self: *@This(), key: String, value: String) !void {
+    @setEvalBranchQuota(1000_000);
+    try self.grow();
+
+    const kstr = self.keys_string[key.idx..][0..key.len];
+    const hash, const fingerprint = getHFP(kstr);
+    const i = self.getIndex(fingerprint, hash, kstr);
+    if (self.meta()[i] == 0) {
+      self.meta()[i] = fingerprint;
+      self.keys()[i] = key;
+      self.size += 1;
+      self.available -= 1;
+      self.keys_string_len += key.len;
+    }
+
+    self.values()[i] = value;
+  }
+
+  fn grow(self: *@This()) !void {
     @setEvalBranchQuota(1000_000);
     if (self.available > self.size) return;
-    var new = init(if (self.size == 0) 16 else self.size * 2);
+    var new = try init(self.keys_string, if (self.size == 0) 16 else self.size * 2, self.allocator);
+    new.values_string = self.values_string;
+    new.size = self.size;
+    new.keys_string_len = self.keys_string_len;
 
-    var it = self.iterator();
-    while (it.next()) |entry| {
-      new.put(entry.key, entry.value);
+    for (self.meta(), self.keys(), self.values()) |m, k, v| {
+      if (m == 0) continue;
+      const kstr = self.keys_string[k.idx..][0..k.len];
+      const hash, _ = getHFP(kstr);
+      var i: usize = @intCast(hash & (self.cap - 1));
+      while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {}
+      new.meta()[i] = m;
+      new.keys()[i] = k;
+      new.values()[i] = v;
     }
 
+    self.allocator.free(@as([*]u8, @ptrCast(self._keys))[0.. (2 * @sizeOf(String) + 1) * self.cap]);
     self.* = new;
+  }
+
+  pub fn deinit(self: *Self) void {
+    self.allocator.free(@as([*]u8, @ptrCast(self._keys))[0.. (2 * @sizeOf(String) + 1) * self.cap]);
+    self.values_string.deinit(self.allocator);
   }
 };
 
 pub const ComptimeEnvType = struct {
   const Self = @This();
   const Size = u32;
-  pub const KV = ComptimeHashMap.KV;
+  pub const KV = HashMap.KV;
   pub const Bucket = struct {key_idx: u40, key_len: u24};
 
   data: []const u8 = &.{},
-  buckets: []const Bucket = &.{},
-  meta: []const u8 = &.{},
+  _buckets: [*]const Bucket = &.{},
+  _meta: [*]const u8 = &.{},
+  cap: Size = 0,
   size: Size = 0,
 
-  pub fn fromComptimeHashMap(comptime hm: ComptimeHashMap) Self {
+  const getHFP = HashMap.getHFP;
+
+  pub fn fromComptimeHashMap(hm: HashMap) Self {
     @setEvalBranchQuota(1000_000);
-    var self: @This() = .{};
+    var self: @This() = .{ .cap = hm.cap, .size = hm.size };
+    var buckets_v: []const Bucket = &.{};
+    var meta_v: []const u8 = &.{};
+
     var last_exists = false;
-    for (hm.keys, hm.values, hm.meta) |key, value, meta| {
-      self.meta = self.meta ++ &[_]u8{meta};
-      if (meta == 0) {
+    for (hm.meta(), hm.keys(), hm.values()) |m, k, v| {
+      meta_v = meta_v ++ &[_]u8{m};
+      if (m == 0) {
         if (last_exists) {
-          self.buckets = self.buckets ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
+          buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
         } else {
-          self.buckets = self.buckets ++ &[_]Bucket{undefined};
+          buckets_v = buckets_v ++ &[_]Bucket{undefined};
         }
         last_exists = false;
       } else {
-        const ks = hm.keys_string[key.idx..][0..key.len];
-        const vs = hm.values_string[value.idx..][0..value.len];
-        self.buckets = self.buckets ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = @intCast(ks.len) } };
+        const ks = hm.keys_string[k.idx..][0..k.len];
+        const vs = hm.values_string.items[v.idx..][0..v.len];
+        buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = @intCast(ks.len) } };
         self.data = self.data ++ ks ++ vs;
         last_exists = true;
-        self.size += 1;
       }
     }
-    self.buckets = self.buckets ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
-    std.debug.assert(self.size == hm.size);
+    std.debug.assert(buckets_v.len == self.cap);
+    std.debug.assert(meta_v.len == self.cap);
+
+    buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
+    self._buckets = buckets_v.ptr;
+    self._meta = meta_v.ptr;
 
     return self;
-  }
-
-  pub fn count(self: *const @This()) usize {
-    return self.size;
-  }
-
-  pub fn capacity(self: *const @This()) usize {
-    return self.buckets.len - 1;
   }
 
   pub const Iterator = struct {
@@ -373,31 +358,34 @@ pub const ComptimeEnvType = struct {
   };
 
   pub fn iterator(self: *const Self) Iterator { return .{ .map = self }; }
+  pub inline fn count(self: *const @This()) usize { return self.size; }
+  pub inline fn capacity(self: *const @This()) usize { return self.cap; }
+  pub inline fn buckets(self: *const @This()) []const Bucket { return self._buckets[0..self.cap+1]; }
+  pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
 
-  const getFingerprint = ComptimeHashMap.getFingerprint;
   pub fn get(self: Self, key: []const u8) ?[]const u8 {
-    const h = std.hash_map.StringContext.hash(undefined, key);
-    const fp = getFingerprint(h);
-    var i: usize = @intCast(h & (self.capacity() - 1));
-    while (self.meta[i] != 0) : (i = (i + 1) & (self.capacity() - 1)) {
-      const b = self.buckets[i];
-      if (self.meta[i] == fp and std.mem.eql(u8, key, self.data[@intCast(b.key_idx)..][0..@intCast(b.key_len)])) {
-        const next = self.buckets[i + 1];
-        return self.data[0..@intCast(next.key_idx)][@intCast(b.key_idx)..][@intCast(b.key_len)..];
+    const hash, const fingerprint = getHFP(key);
+    var i: usize = @intCast(hash & (self.cap - 1));
+    while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
+      const bucket = self.buckets()[i];
+      if (self.meta()[i] == fingerprint and std.mem.eql(u8, key, self.data[@intCast(bucket.key_idx)..][0..@intCast(bucket.key_len)])) {
+        const next = self.buckets()[i + 1];
+        return self.data[0..@intCast(next.key_idx)][@intCast(bucket.key_idx)..][@intCast(bucket.key_len)..];
       }
     }
+
     return null;
   }
 };
 
 const EnvType = struct {
   /// The underlying string map
-  map: ParseOptions.MapType,
+  map: HashMap,
   _keys: []const u8,
 
   /// Finds the value associated with a key in the map
   pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
-    return self.map.getAdapted(key, ParseOptions.MapTypeContext{ .result = self._keys });
+    return self.map.get(key);
   }
 
   /// Release the backing array and invalidate this map.
@@ -406,21 +394,6 @@ const EnvType = struct {
   /// that that is done before calling this function.
   pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     defer self.map.deinit(allocator);
-    var iter = self.iterator();
-    while (iter.next()) |entry| allocator.free(entry.value_ptr.*);
-  }
-
-  /// Returns an iterator over entries in the map.
-  pub fn iterator(self: *const @This()) ParseOptions.MapType.Iterator {
-    return self.map.iterator();
-  }
-
-  /// Format the entire map as KEY=VALUE\n lines for printing
-  pub fn format(self: *const @This(), writer: std.Io.Writer) std.Io.Writer.Error!void {
-    var iter = self.iterator();
-    while (iter.next()) |entry| {
-      try writer.print("{s}={s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-    }
   }
 };
 
@@ -457,22 +430,18 @@ inline fn decodeHex(char: u8) u8 {
 
 fn GetParser(in_comptime: bool, options: ParseOptions) type {
   return struct {
-    string: []const u8,
-    allocator: std.mem.Allocator,
-    result: std.ArrayList(u8) = .{},
-    map: if (in_comptime) ParseOptions.ComptimeMapType else ParseOptions.MapType = .{},
-
+    map: HashMap,
     at: usize = 0,
     line: usize = 0,
     line_start: usize = 0,
 
     fn done(self: *@This()) bool {
-      return self.at >= self.string.len;
+      return self.at >= self.map.keys_string.len;
     }
 
     fn current(self: *@This()) ?u8 {
       if (self.done()) return null;
-      return self.string[self.at];
+      return self.map.keys_string[self.at];
     }
 
     fn currentU9(self: *@This()) u9 {
@@ -481,7 +450,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 
     fn last(self: *@This()) u8 {
       std.debug.assert(self.at != 0);
-      return self.string[self.at - 1];
+      return self.map.keys_string[self.at - 1];
     }
 
     fn take(self: *@This()) ?u8 {
@@ -499,7 +468,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
 
     fn skipUptoAny(self: *@This(), comptime end: []const u8) void {
-      while (self.at < self.string.len and !isOneOf(self.current().?, end)) {
+      while (self.at < self.map.keys_string.len and !isOneOf(self.current().?, end)) {
         self.at += 1;
       }
     }
@@ -509,21 +478,21 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
     
     fn skipAny(self: *@This(), comptime chars: []const u8) void {
-      while (self.at < self.string.len and isOneOf(self.current().?, chars)) {
+      while (self.at < self.map.keys_string.len and isOneOf(self.current().?, chars)) {
         self.at += 1;
       }
     }
 
     fn currentAsSlice(self: *@This()) []const u8 {
-      std.debug.assert(self.at < self.string.len);
-      return self.string[self.at..][0..1];
+      std.debug.assert(self.at < self.map.keys_string.len);
+      return self.map.keys_string[self.at..][0..1];
     }
 
     fn printErrorMarker(self: *@This()) void {
       const at = self.at;
-      self.string = self.string[0.. @min(self.at + options.max_error_line_peek, self.string.len)];
+      self.map.keys_string = self.map.keys_string[0.. @min(self.at + options.max_error_line_peek, self.map.keys_string.len)];
       self.skipUpto('\n');
-      options.log_fn(":{d}:{d}\n{s}\n", .{self.line, at - self.line_start, self.string[self.line_start..self.at]});
+      options.log_fn(":{d}:{d}\n{s}\n", .{self.line, at - self.line_start, self.map.keys_string[self.line_start..self.at]});
       if (@inComptime()) {
         options.log_fn((" " ** @as(usize, at - self.line_start - 1)) ++ "^\n", .{});
       } else {
@@ -534,7 +503,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       }
     }
 
-    fn parseKey(self: *@This()) ParseKeyError!?ParseOptions.Istring {
+    fn parseKey(self: *@This()) ParseKeyError!?HashMap.String {
       // Skip any whitespace / comment lines, break at first non-whitespace character
       while (true) {
         self.skipAny(" \t\x0B\r\x0C");
@@ -578,7 +547,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         return ParseKeyError.UnexpectedEndOfFile;
       }
 
-      const retval: ParseOptions.Istring = .{ .idx = @intCast(start), .len = @intCast(self.at - start) };
+      const retval: HashMap.String = .{ .idx = @intCast(start), .len = @intCast(self.at - start) };
       const c = self.take() orelse {
         options.log_fn("Unexpected end of file, expected `=` ", .{});
         self.printErrorMarker();
@@ -617,8 +586,8 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
 
     fn trimResultEnd(self: *@This()) void {
-      while (self.result.items.len > 0 and isOneOf(self.result.items[self.result.items.len - 1], " \t\x0B\r\x0C")) {
-        self.result.items.len -= 1;
+      while (self.map.values_string.items.len > 0 and isOneOf(self.map.values_string.items[self.map.values_string.items.len - 1], " \t\x0B\r\x0C")) {
+        self.map.values_string.items.len -= 1;
       }
     }
 
@@ -639,39 +608,39 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           switch (if (quote_char) |c| @as(u9, c) else 0x100) {
             0x100 => switch (self.takeU9()) {
               0x100 => continue :blk 0x100,
-              '\\', '$' => |c| try self.result.append(self.allocator, @intCast(c)),
+              '\\', '$' => |c| try self.map.values_string.append(self.map.allocator, @intCast(c)),
               '\n' => {
                 self.line += 1;
                 self.line_start = self.at;
-                try self.result.append(self.allocator, '\n');
+                try self.map.values_string.append(self.map.allocator, '\n');
               },
-              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', @intCast(c)}),
+              else => |c| try self.map.values_string.appendSlice(self.map.allocator, &[_]u8{'\\', @intCast(c)}),
             },
             '\'' => switch (self.takeU9()) {
               0x100 => continue :blk 0x100,
-              '\\', '\'' => |c| try self.result.append(self.allocator, @intCast(c)),
+              '\\', '\'' => |c| try self.map.values_string.append(self.map.allocator, @intCast(c)),
               '\n' => {
                 self.line += 1;
                 self.line_start = self.at;
-                try self.result.append(self.allocator, '\n');
+                try self.map.values_string.append(self.map.allocator, '\n');
               },
-              else => |c| try self.result.appendSlice(self.allocator, &[_]u8{'\\', @intCast(c)}),
+              else => |c| try self.map.values_string.appendSlice(self.map.allocator, &[_]u8{'\\', @intCast(c)}),
             },
             '"' => switch (self.takeU9()) {
               0x100 => continue :blk 0x100,
-              '\\' => try self.result.append(self.allocator, '\\'),
-              'n' => try self.result.append(self.allocator, '\n'),
-              'r' => try self.result.append(self.allocator, '\r'),
-              't' => try self.result.append(self.allocator, '\t'),
-              'v' => try self.result.append(self.allocator, '\x0B'),
-              'f' => try self.result.append(self.allocator, '\x0C'),
+              '\\' => try self.map.values_string.append(self.map.allocator, '\\'),
+              'n' => try self.map.values_string.append(self.map.allocator, '\n'),
+              'r' => try self.map.values_string.append(self.map.allocator, '\r'),
+              't' => try self.map.values_string.append(self.map.allocator, '\t'),
+              'v' => try self.map.values_string.append(self.map.allocator, '\x0B'),
+              'f' => try self.map.values_string.append(self.map.allocator, '\x0C'),
               'x' => {
                 const hexa = self.take() orelse continue :blk 0x100;
                 const hexb = self.take() orelse continue :blk 0x100;
                 if (!std.ascii.isHex(hexa) or !std.ascii.isHex(hexb)) {
                   options.log_fn("Invalid hex escape sequence `\\x{s}{s}` in a{s} value at ", .{
-                    escaped(hexa) orelse self.string[self.at - 2..][0..1],
-                    escaped(hexb) orelse self.string[self.at - 1..][0..1],
+                    escaped(hexa) orelse self.map.keys_string[self.at - 2..][0..1],
+                    escaped(hexb) orelse self.map.keys_string[self.at - 1..][0..1],
                     quote_string,
                   });
                   self.at -= if (!std.ascii.isHex(hexa)) 2 else 1;
@@ -679,10 +648,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
                   return ParseValueError.InvalidEscapeSequence;
                 }
 
-                try self.result.append(self.allocator, @intCast((decodeHex(hexa) << 4) | decodeHex(hexb)));
+                try self.map.values_string.append(self.map.allocator, @intCast((decodeHex(hexa) << 4) | decodeHex(hexb)));
               },
-              '$' => try self.result.append(self.allocator, '$'),
-              '\"' => try self.result.append(self.allocator, '"'),
+              '$' => try self.map.values_string.append(self.map.allocator, '$'),
+              '\"' => try self.map.values_string.append(self.map.allocator, '"'),
               else => |c_u9| {
                 const c: u8 = @intCast(c_u9);
 
@@ -701,7 +670,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         '$' => {
           const next = self.takeU9();
           if (quote_char == '\'' or next != '{') {
-            try self.result.append(self.allocator, '$');
+            try self.map.values_string.append(self.map.allocator, '$');
             continue :blk next;
           }
 
@@ -734,21 +703,17 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
             return ParseValueError.UnterminatedSubstitutionBlock;
           }
 
-          const key = self.string[start..self.at - 1];
+          const key = self.map.keys_string[start..self.at - 1];
           const maybe_val = if (in_comptime) self.map.get(key)
-            else self.map.getAdapted(key, ParseOptions.MapTypeContext{ .result = self.string });
+            else self.map.getAdapted(key, ParseOptions.MapTypeContext{ .result = self.map.keys_string });
           const val = maybe_val orelse {
             options.log_fn("Substitution key `{s}` not found in map; at ", .{key});
             self.at = start;
             self.printErrorMarker();
-            var iter = self.map.iterator();
-            while (iter.next()) |entry| {
-              options.log_fn("`{s}`: `{s}`\n", .{ self.string[entry.key_ptr.*.idx..][0..entry.key_ptr.*.len], entry.value_ptr.* });
-            }
             return ParseValueError.SubstitutionKeyNotFound;
           };
 
-          try self.result.appendSlice(self.allocator, val);
+          try self.map.values_string.appendSlice(self.map.allocator, val);
           continue :blk self.takeU9();
         },
         '\n' => {
@@ -758,7 +723,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
             self.trimResultEnd();
             return;
           }
-          try self.result.append(self.allocator, '\n');
+          try self.map.values_string.append(self.map.allocator, '\n');
           continue :blk self.takeU9();
         },
         else => |c| {
@@ -771,7 +736,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           }
           if (quote_char != null and c == quote_char.?) break :blk;
 
-          try self.result.append(self.allocator, @intCast(c));
+          try self.map.values_string.append(self.map.allocator, @intCast(c));
           continue :blk self.takeU9();
         },
       }
@@ -791,59 +756,51 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
 
     const ParseResult = EnvType;
-    fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!ParseResult {
-      var self: @This() = .{
-        .string = data,
-        .allocator = allocator,
-      };
-
-      errdefer self.deinit();
-
-      while (!self.done()) {
-        const key_idx = try self.parseKey() orelse break;
-        // try self.result.appendSlice(self.allocator, key);
-
-        const gpr = try self.map.getOrPutContext(self.allocator, key_idx, .{ .result = self.string });
-        if (gpr.found_existing) {
-          self.result = .fromOwnedSlice(@constCast(gpr.value_ptr.*));
-          self.result.items.len = 0;
-        }
-
-        errdefer {
-          self.map.removeByPtr(gpr.key_ptr);
-        }
-
-        try self.parseValue();
-        gpr.value_ptr.* = try self.result.toOwnedSlice(allocator);
-      }
-
-      return .{ .map = self.map, ._keys = data };
-    }
+    // fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!ParseResult {
+    //   var self: @This() = .{
+    //     .string = data,
+    //     .allocator = allocator,
+    //   };
+    //
+    //   errdefer self.deinit();
+    //
+    //   while (!self.done()) {
+    //     const key_idx = try self.parseKey() orelse break;
+    //     // try self.map.values_string.appendSlice(self.allocator, key);
+    //
+    //     const gpr = try self.map.getOrPutContext(self.allocator, key_idx, .{ .result = self.map.keys_string });
+    //     if (gpr.found_existing) {
+    //       self.map.values_string = .fromOwnedSlice(@constCast(gpr.value_ptr.*));
+    //       self.map.values_string.items.len = 0;
+    //     }
+    //
+    //     errdefer {
+    //       self.map.removeByPtr(gpr.key_ptr);
+    //     }
+    //
+    //     try self.parseValue();
+    //     gpr.value_ptr.* = try self.map.values_string.toOwnedSlice(allocator);
+    //   }
+    //
+    //   return .{ .map = self.map, ._keys = data };
+    // }
 
     fn parseComptime(comptime data: []const u8, comptime allocator: std.mem.Allocator) ParseValueError!ComptimeEnvType {
       @setEvalBranchQuota(1000_000);
-      var self: @This() = .{
-        .string = data,
-        .allocator = allocator,
-        .map = .init(16),
-      };
+      var self: @This() = .{ .map = try .init(data, 32, allocator) };
+      errdefer self.deinit();
 
-      while (!self.done()) {
-        const key_idx = try self.parseKey() orelse break;
+      while (try self.parseKey()) |key| {
+        const value_idx = self.map.values_string.items.len;
         try self.parseValue();
-        self.map.put(self.string[key_idx.idx..][0..key_idx.len], self.result.toOwnedSlice(allocator) catch unreachable);
+        try self.map.put(key, .{ .idx = value_idx, .len = self.map.values_string.items.len - value_idx });
       }
 
       return .fromComptimeHashMap(self.map);
     }
 
     fn deinit(self: *@This()) void {
-      self.result.deinit(self.allocator);
-      defer self.map.deinit(self.allocator);
-      var iter = self.map.iterator();
-      while (iter.next()) |entry| {
-        self.allocator.free(entry.value_ptr.*);
-      }
+      self.map.deinit();
     }
   };
 }
