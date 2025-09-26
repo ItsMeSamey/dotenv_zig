@@ -431,20 +431,10 @@ const EnvType = struct {
   cap: Size = 0,
   size: Size = 0,
 
+  /// Caller owns the hashmap
   fn fromHashMap(hm: *HashMap) !@This() {
     const allocation_size = (hm.cap + 1) * @sizeOf(Bucket) + hm.cap + (hm.keys_string_len + hm.values_string.items.len);
-    var allocation: []align(@alignOf(Bucket)) u8 = try hm.allocator.alignedAlloc(u8, std.mem.Alignment.of(Bucket), allocation_size);
-
-    // const hm_allocation = hm.allocation();
-    // if (hm_allocation.len < allocation_size) {
-    //   if (hm.allocator.resize(hm_allocation, allocation_size)) {
-    //     allocation = hm_allocation.ptr[0..allocation_size];
-    //   } else {
-    //     allocation = try hm.allocator.alignedAlloc(u8, std.mem.Alignment.of(Bucket), allocation_size);
-    //   }
-    // }
-
-    defer hm.deinit();
+    var allocation = try hm.allocator.alignedAlloc(u8, std.mem.Alignment.of(Bucket), allocation_size);
 
     const retval: @This() = .{
       ._meta = allocation[(hm.cap + 1) * @sizeOf(Bucket)..].ptr,
@@ -511,7 +501,7 @@ const EnvType = struct {
   pub inline fn count(self: *const @This()) usize { return self.size; }
   pub inline fn capacity(self: *const @This()) usize { return self.cap; }
   pub inline fn buckets(self: *const @This()) []const Bucket {
-    return @as([*]const Bucket, @ptrFromInt(@intFromPtr(self._meta) - (self.cap + 1) * @sizeOf(Bucket)))[0..self.cap+1];
+    return @as([*]const Bucket, @ptrCast(@alignCast((self._meta - @as(usize, (self.cap + 1) * @sizeOf(Bucket))))))[0..self.cap+1];
   }
   pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
 
@@ -901,7 +891,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!if(in_comptime) ComptimeEnvType else EnvType {
       @setEvalBranchQuota(1000_000);
       var self: @This() = .{ .map = try .init(data, 32, allocator) };
-      errdefer self.deinit();
+      defer self.deinit();
 
       while (try self.parseKey()) |key| {
         const value_idx = self.map.values_string.items.len;
