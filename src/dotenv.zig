@@ -336,46 +336,54 @@ pub const ComptimeEnvType = struct {
     const KeyLenType = std.meta.Int(.unsigned, if (@bitSizeOf(usize) < 40) @bitSizeOf(usize) else 24);
   };
 
+  /// key+value strings concatenated together
   data: []const u8 = &.{},
+  /// Buckets of the hashmap
   _buckets: [*]const Bucket = &.{},
+  /// Metadata of the hashmap
   _meta: [*]const u8 = &.{},
+  /// Capacity of the hashmap
   cap: Size = 0,
+  /// How many elements are in use
   size: Size = 0,
 
-  pub fn fromHashMap(hm: *HashMap) error{}!@This() {
+  /// Create a new ComptimeEnvType from a HashMap
+  pub fn fromHashMap(comptime hm: *HashMap) error{}!@This() {
     @setEvalBranchQuota(1000_000);
-    var self: @This() = .{ .cap = hm.cap, .size = hm.size };
-    var buckets_v: []const Bucket = &.{};
-    var meta_v: []const u8 = &.{};
+    comptime {
+      var self: @This() = .{ .cap = hm.cap, .size = hm.size };
+      var buckets_v: []const Bucket = &.{};
+      var meta_v: []const u8 = &.{};
 
-    var last_exists = false;
-    for (hm.meta(), hm.keys(), hm.values()) |m, k, v| {
-      meta_v = meta_v ++ &[_]u8{m};
-      if (m == 0) {
-        if (last_exists) {
-          buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
+      var last_exists = false;
+      for (hm.meta(), hm.keys(), hm.values()) |m, k, v| {
+        meta_v = meta_v ++ &[_]u8{m};
+        if (m == 0) {
+          if (last_exists) {
+            buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
+          } else {
+            buckets_v = buckets_v ++ &[_]Bucket{undefined};
+          }
+          last_exists = false;
         } else {
-          buckets_v = buckets_v ++ &[_]Bucket{undefined};
+          const ks = hm.keys_string[k.idx..][0..k.len];
+          const vs = hm.values_string.items[v.idx..][0..v.len];
+          buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = @intCast(ks.len) } };
+          // we re-append to the data because we if any key was overwrite, there would be a unused value string that
+          // would not get GC'd (last tested with zig-0.15.1)
+          self.data = self.data ++ ks ++ vs;
+          last_exists = true;
         }
-        last_exists = false;
-      } else {
-        const ks = hm.keys_string[k.idx..][0..k.len];
-        const vs = hm.values_string.items[v.idx..][0..v.len];
-        buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = @intCast(ks.len) } };
-        // we re-append to the data because we if any key was overwrite, there would be a unused value string that
-        // would not get GC'd (last tested with zig-0.15.1)
-        self.data = self.data ++ ks ++ vs;
-        last_exists = true;
       }
+      std.debug.assert(buckets_v.len == self.cap);
+      std.debug.assert(meta_v.len == self.cap);
+
+      buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
+      self._buckets = buckets_v.ptr;
+      self._meta = meta_v.ptr;
+
+      return self;
     }
-    std.debug.assert(buckets_v.len == self.cap);
-    std.debug.assert(meta_v.len == self.cap);
-
-    buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = undefined } };
-    self._buckets = buckets_v.ptr;
-    self._meta = meta_v.ptr;
-
-    return self;
   }
 
   pub const Iterator = struct {
@@ -386,9 +394,9 @@ pub const ComptimeEnvType = struct {
       if (it.i >= it.map.capacity()) return null;
       while (it.i < it.map.capacity()) {
         defer it.i += 1;
-        if (it.map.meta[it.i] == 0) continue;
-        const bucket = it.map.buckets[it.i];
-        const next_bucket = it.map.buckets[it.i + 1];
+        if (it.map.meta()[it.i] == 0) continue;
+        const bucket = it.map.buckets()[it.i];
+        const next_bucket = it.map.buckets()[it.i + 1];
         return .{
           .key = it.map.data[@intCast(bucket.key_idx)..][0..@intCast(bucket.key_len)],
           .value = it.map.data[0..@intCast(next_bucket.key_idx)][@intCast(bucket.key_idx)..][@intCast(bucket.key_len)..]
@@ -422,27 +430,33 @@ pub const ComptimeEnvType = struct {
     return comptime self.getRuntime(key);
   }
 
-  pub fn deinit(self: *@This()) void {
-    if (!@inComptime()) @compileError("deinit on a comptime map must only be called at comptime");
+  pub fn deinit(comptime self: *@This()) void {
     self.data = undefined;
     self._buckets  = undefined;
     self._meta = undefined;
   }
 };
 
+/// A type to store the parsed data at runtime. Stores buckets + metadata + key + value strings
+/// in a single allocation.
+/// 
+/// see comment for `ComptimeEnvType`
 const EnvType = struct {
   const Size = u32;
   pub const KV = HashMap.KV;
   pub const Bucket = ComptimeEnvType.Bucket;
 
-  /// The underlying string map
+  /// This is a mid-way pointer, before it is the buckets, after it is the concatenated key + value strings
   _meta: [*]u8 = &.{},
+  /// This is the size of the key + value strings region
   _data_size: usize = 0,
+  /// This is the size of the buckets / metadata region
   cap: Size = 0,
+  /// How many elements are in use
   size: Size = 0,
 
   /// Caller owns the hashmap
-  fn fromHashMap(hm: *HashMap) !@This() {
+  pub fn fromHashMap(hm: *HashMap) !@This() {
     const allocation_size = (hm.cap + 1) * @sizeOf(Bucket) + hm.cap + (hm.keys_string_len + hm.values_string.items.len);
     var allocation = try hm.allocator.alignedAlloc(u8, std.mem.Alignment.of(Bucket), allocation_size);
 
@@ -483,11 +497,19 @@ const EnvType = struct {
     return retval;
   }
 
+  /// Iterator over the key/value pairs. It stores pointers to the buckets, metadata, and key+value strings
+  /// and not the hashmap itself because since hashmap contains a mid-way pointer, it would take more cycles
+  /// to derive the buckets and key+value strings from the hashmap.
   pub const Iterator = struct {
+    /// Buckets of the hashmap
     buckets: [*]const Bucket,
+    /// Metadata of the hashmap
     meta: [*]const u8,
+    /// key+value strings concatenated together
     data: [*]const u8,
+    /// Capacity of the hashmap
     cap: Size,
+    /// The current index
     i: Size = 0,
 
     pub fn next(it: *Iterator) ?KV {
@@ -541,6 +563,7 @@ const EnvType = struct {
   }
 };
 
+/// Not sure if this is that good of an idea
 fn isOneOf(c: u8, comptime chars: []const u8) bool {
   const VectorType = @Vector(chars.len, u8);
   const query_vec: VectorType = chars[0..chars.len].*;
@@ -548,6 +571,9 @@ fn isOneOf(c: u8, comptime chars: []const u8) bool {
   return @reduce(.Min, query_vec ^ current_vec) == 0;
 }
 
+/// Escape a character, otherwise return null
+/// we return a pointer so that it is trivially convertible to a string slice
+/// we can do this as the string literals are statically stored in the binary
 fn escaped(c: u8) ?*const [2]u8 {
   return switch (c) {
     '\\' => "\\\\",
@@ -560,6 +586,7 @@ fn escaped(c: u8) ?*const [2]u8 {
   };
 }
 
+/// Mapping for decoding hex characters
 const HEX_DECODE_ARRAY = blk: {
   var all: ['f' - '0' + 1]u8 = undefined;
   for ('0'..('9' + 1)) |b| all[b - '0'] = b - '0';
@@ -921,6 +948,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 //------
 // Tests
 //------
+
+test {
+  std.testing.refAllDeclsRecursive(@This());
+}
 
 const ENV_TEST_STRING_1: []const u8 = 
   \\ # This is a comment
