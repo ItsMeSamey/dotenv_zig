@@ -124,7 +124,7 @@ pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseValue
 /// Parses the provided `file_data` string to a StaticStringMap
 /// If a parsing error occurs, a compileError is emitted
 pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseValueError!ComptimeEnvType {
-  return comptime GetParser(true, options).parseComptime(file_data, comptime_allocator);
+  return comptime GetParser(true, options).parse(file_data, comptime_allocator);
 }
 
 // This is taken from https://github.com/ziglang/zig/issues/1291
@@ -201,8 +201,8 @@ pub const HashMap = struct {
     @memset(mem[2 * c * @sizeOf(String)..], 0);
     return .{
       .keys_string = keys_string,
-      ._keys = @ptrCast(mem.ptr),
-      ._values = @ptrCast(mem[c * @sizeOf(String)..].ptr),
+      ._keys = @alignCast(@ptrCast(mem.ptr)),
+      ._values = @alignCast(@ptrCast(mem[c * @sizeOf(String)..].ptr)),
       ._meta = mem[2 * c * @sizeOf(String)..].ptr,
       .cap = c,
       .available = c * default_max_load_percentage / 100,
@@ -233,7 +233,7 @@ pub const HashMap = struct {
     return i;
   }
 
-  pub fn get(self: *@This(), key: []const u8) ?[]const u8 {
+  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
     @setEvalBranchQuota(1000_000);
     const hash, const fingerprint = getHFP(key);
     const i = self.getIndex(fingerprint, hash, key);
@@ -279,12 +279,16 @@ pub const HashMap = struct {
       new.values()[i] = v;
     }
 
-    self.allocator.free(@as([*]u8, @ptrCast(self._keys))[0.. (2 * @sizeOf(String) + 1) * self.cap]);
+    self.allocator.free(self.allocation());
     self.* = new;
   }
 
+  fn allocation(self: *Self) [] align(@alignOf(String)) u8 {
+    return @as([*] align(@alignOf(String)) u8, @alignCast(@ptrCast(self._keys)))[0.. (2 * @sizeOf(String) + 1) * self.cap];
+  }
+
   pub fn deinit(self: *Self) void {
-    self.allocator.free(@as([*]u8, @ptrCast(self._keys))[0.. (2 * @sizeOf(String) + 1) * self.cap]);
+    self.allocator.free(self.allocation());
     self.values_string.deinit(self.allocator);
   }
 };
@@ -303,7 +307,7 @@ pub const ComptimeEnvType = struct {
 
   const getHFP = HashMap.getHFP;
 
-  pub fn fromComptimeHashMap(hm: HashMap) Self {
+  pub fn fromHashMap(hm: HashMap) Self {
     @setEvalBranchQuota(1000_000);
     var self: @This() = .{ .cap = hm.cap, .size = hm.size };
     var buckets_v: []const Bucket = &.{};
@@ -381,7 +385,10 @@ pub const ComptimeEnvType = struct {
 const EnvType = struct {
   /// The underlying string map
   map: HashMap,
-  _keys: []const u8,
+
+  fn fromHashMap(hm: HashMap) @This() {
+    return @This(){ .map = hm };
+  }
 
   /// Finds the value associated with a key in the map
   pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
@@ -393,7 +400,12 @@ const EnvType = struct {
   /// If your keys or values need to be released, ensure
   /// that that is done before calling this function.
   pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    defer self.map.deinit(allocator);
+    _ = allocator;
+    defer self.map.deinit();
+  }
+
+  pub fn count(self: *const @This()) usize {
+    return self.map.size;
   }
 };
 
@@ -704,8 +716,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           }
 
           const key = self.map.keys_string[start..self.at - 1];
-          const maybe_val = if (in_comptime) self.map.get(key)
-            else self.map.getAdapted(key, ParseOptions.MapTypeContext{ .result = self.map.keys_string });
+          const maybe_val = self.map.get(key);
           const val = maybe_val orelse {
             options.log_fn("Substitution key `{s}` not found in map; at ", .{key});
             self.at = start;
@@ -755,37 +766,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       _ = self.take();
     }
 
-    const ParseResult = EnvType;
-    // fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!ParseResult {
-    //   var self: @This() = .{
-    //     .string = data,
-    //     .allocator = allocator,
-    //   };
-    //
-    //   errdefer self.deinit();
-    //
-    //   while (!self.done()) {
-    //     const key_idx = try self.parseKey() orelse break;
-    //     // try self.map.values_string.appendSlice(self.allocator, key);
-    //
-    //     const gpr = try self.map.getOrPutContext(self.allocator, key_idx, .{ .result = self.map.keys_string });
-    //     if (gpr.found_existing) {
-    //       self.map.values_string = .fromOwnedSlice(@constCast(gpr.value_ptr.*));
-    //       self.map.values_string.items.len = 0;
-    //     }
-    //
-    //     errdefer {
-    //       self.map.removeByPtr(gpr.key_ptr);
-    //     }
-    //
-    //     try self.parseValue();
-    //     gpr.value_ptr.* = try self.map.values_string.toOwnedSlice(allocator);
-    //   }
-    //
-    //   return .{ .map = self.map, ._keys = data };
-    // }
-
-    fn parseComptime(comptime data: []const u8, comptime allocator: std.mem.Allocator) ParseValueError!ComptimeEnvType {
+    fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!if(in_comptime) ComptimeEnvType else EnvType {
       @setEvalBranchQuota(1000_000);
       var self: @This() = .{ .map = try .init(data, 32, allocator) };
       errdefer self.deinit();
@@ -796,7 +777,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         try self.map.put(key, .{ .idx = value_idx, .len = self.map.values_string.items.len - value_idx });
       }
 
-      return .fromComptimeHashMap(self.map);
+      return .fromHashMap(self.map);
     }
 
     fn deinit(self: *@This()) void {
@@ -825,36 +806,36 @@ const ENV_TEST_STRING_1: []const u8 =
   \\    value"
 ;
 
-// test loadFrom {
-//   var parsed = try loadFromData(ENV_TEST_STRING_1, std.testing.allocator, .{});
-//   defer parsed.deinit(std.testing.allocator);
-//
-//   // var iter = parsed.iterator();
-//   // while (iter.next()) |kv| {
-//   //   std.debug.print("`{s}`: `{s}`\n", .{ENV_TEST_STRING_1[kv.key_ptr.*.idx..][0..kv.key_ptr.*.len], kv.value_ptr.*});
-//   // }
-//
-//   try std.testing.expectEqualStrings("", parsed.get("NOTHING").?);
-//   try std.testing.expectEqualStrings("localhost", parsed.get("HOSTNAME").?);
-//   try std.testing.expectEqualStrings("8080", parsed.get("PORT").?);
-//   try std.testing.expectEqualStrings("http://localhost:8080", parsed.get("URL").?);
-//   try std.testing.expectEqualStrings("", parsed.get("FALLBACK").?);
-//   try std.testing.expectEqualStrings("${This Will Not Be Substitutes}", parsed.get("LITERAL").?);
-//   try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
-//   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
-//
-//   const TestFns = struct {
-//     fn loadFn(comptime data: []const u8, comptime options: ParseOptions) ParseError!EnvType {
-//       return loadFromData(data, std.testing.allocator, options);
-//     }
-//
-//     fn deinitFn(v: *EnvType) void {
-//       v.deinit(std.testing.allocator);
-//     }
-//   };
-//
-//   _ = GetTests(TestFns.loadFn, TestFns.deinitFn);
-// }
+test loadFrom {
+  var parsed = try loadFromData(ENV_TEST_STRING_1, std.testing.allocator, .{});
+  defer parsed.deinit(std.testing.allocator);
+
+  // var iter = parsed.iterator();
+  // while (iter.next()) |kv| {
+  //   std.debug.print("`{s}`: `{s}`\n", .{ENV_TEST_STRING_1[kv.key_ptr.*.idx..][0..kv.key_ptr.*.len], kv.value_ptr.*});
+  // }
+
+  try std.testing.expectEqualStrings("", parsed.get("NOTHING").?);
+  try std.testing.expectEqualStrings("localhost", parsed.get("HOSTNAME").?);
+  try std.testing.expectEqualStrings("8080", parsed.get("PORT").?);
+  try std.testing.expectEqualStrings("http://localhost:8080", parsed.get("URL").?);
+  try std.testing.expectEqualStrings("", parsed.get("FALLBACK").?);
+  try std.testing.expectEqualStrings("${This Will Not Be Substitutes}", parsed.get("LITERAL").?);
+  try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
+  try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
+
+  const TestFns = struct {
+    fn loadFn(comptime data: []const u8, comptime options: ParseOptions) ParseError!EnvType {
+      return loadFromData(data, std.testing.allocator, options);
+    }
+
+    fn deinitFn(v: *EnvType) void {
+      v.deinit(std.testing.allocator);
+    }
+  };
+
+  _ = GetTests(TestFns.loadFn, TestFns.deinitFn);
+}
 
 test loadFromComptime {
   const parsed = comptime loadFromDataComptime(ENV_TEST_STRING_1, .{})  catch |e| @compileError(@errorName(e));
