@@ -186,6 +186,7 @@ pub const comptime_allocator: std.mem.Allocator = struct {
 /// implementation does not need.
 pub const HashMap = struct {
   const Self = @This();
+  const Size = u32;
   pub const String = packed struct{ idx: usize, len: usize };
   pub const KV = struct { key: []const u8, value: []const u8 };
   const default_max_load_percentage = std.hash_map.default_max_load_percentage;
@@ -201,11 +202,11 @@ pub const HashMap = struct {
   // These will be at the end of our allocated block, 0 means unused.
   _meta: [*]u8 = &.{},
   /// Length for our keys, values, and meta arrays
-  cap: usize = 0,
+  cap: Size = 0,
   // How many elements are in use
-  size: usize = 0,
+  size: Size = 0,
   // How many elements are available, this is used to reduce the number of instructions needed for the grow check
-  available: usize = 0,
+  available: Size = 0,
   // The allocator that sores everything
   allocator: std.mem.Allocator,
   // The length of key strings
@@ -216,9 +217,9 @@ pub const HashMap = struct {
   pub inline fn values(self: *const @This()) []String { return self._values[0..self.cap]; }
   pub inline fn meta(self: *const @This()) []u8 { return self._meta[0..self.cap]; }
 
-  pub fn init(keys_string: []const u8, cap: usize, allocator: std.mem.Allocator) !Self {
+  pub fn init(keys_string: []const u8, cap: Size, allocator: std.mem.Allocator) !Self {
     @setEvalBranchQuota(1000_000);
-    const c = std.math.ceilPowerOfTwo(usize, cap) catch 16;
+    const c = std.math.ceilPowerOfTwo(Size, cap) catch 16;
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(String), (2 * @sizeOf(String) + 1) * c);
     @memset(mem[2 * c * @sizeOf(String)..], 0);
     return .{
@@ -305,7 +306,7 @@ pub const HashMap = struct {
     self.* = new;
   }
 
-  fn allocation(self: *Self) [] align(@alignOf(String)) u8 {
+  fn allocation(self: *Self) []align(@alignOf(String)) u8 {
     return @as([*] align(@alignOf(String)) u8, @alignCast(@ptrCast(self._keys)))[0.. (2 * @sizeOf(String) + 1) * self.cap];
   }
 
@@ -342,7 +343,7 @@ pub const ComptimeEnvType = struct {
   cap: Size = 0,
   size: Size = 0,
 
-  pub fn fromHashMap(hm: HashMap) Self {
+  pub fn fromHashMap(hm: *HashMap) error{}!Self {
     @setEvalBranchQuota(1000_000);
     var self: @This() = .{ .cap = hm.cap, .size = hm.size };
     var buckets_v: []const Bucket = &.{};
@@ -427,54 +428,57 @@ const EnvType = struct {
   /// The underlying string map
   _meta: [*]u8 = &.{},
   _data_size: usize = 0,
-  size: Size = 0,
   cap: Size = 0,
+  size: Size = 0,
 
-  fn fromHashMap(hm: HashMap) @This() {
-    const allocation_size = hm.cap * (1 + @sizeOf(Bucket)) + @sizeOf(Bucket) + hm.keys_string_len + hm.values_string.items.len;
-    const hm_allocation = hm.allocation();
-    var allocation: []align(@alignOf(Bucket)) u8 = undefined;
+  fn fromHashMap(hm: *HashMap) !@This() {
+    const allocation_size = (hm.cap + 1) * @sizeOf(Bucket) + hm.cap + (hm.keys_string_len + hm.values_string.items.len);
+    var allocation: []align(@alignOf(Bucket)) u8 = try hm.allocator.alignedAlloc(u8, std.mem.Alignment.of(Bucket), allocation_size);
 
-    if (hm_allocation.len < allocation_size) {
-      if (hm.allocator.resize()) {
-        allocation = hm_allocation.ptr[0..allocation_size];
-      } else {
-        allocation = try hm.allocator.alignedAlloc(u8, @alignOf(Bucket), allocation_size);
-      }
-    }
+    // const hm_allocation = hm.allocation();
+    // if (hm_allocation.len < allocation_size) {
+    //   if (hm.allocator.resize(hm_allocation, allocation_size)) {
+    //     allocation = hm_allocation.ptr[0..allocation_size];
+    //   } else {
+    //     allocation = try hm.allocator.alignedAlloc(u8, std.mem.Alignment.of(Bucket), allocation_size);
+    //   }
+    // }
 
-    var retval: @This() = .{
-      ._meta = allocation[0..hm.cap * @sizeOf(Bucket)].ptr,
+    defer hm.deinit();
+
+    const retval: @This() = .{
+      ._meta = allocation[(hm.cap + 1) * @sizeOf(Bucket)..].ptr,
       ._data_size =  hm.keys_string_len + hm.values_string.items.len,
       .size = hm.size,
       .cap = hm.cap,
     };
 
-    const buckets_v = retval.buckets();
-    const meta_v = retval.meta();
-    var data_v = retval.data();
+    const buckets_v = @constCast(retval.buckets());
+    const meta_v = @constCast(retval.meta());
+    const data_v = @constCast(retval.data());
+    var data_idx: usize = 0;
     var last_exists = false;
 
     for (hm.meta(), hm.keys(), hm.values(), 0..) |m, k, v, i| {
       meta_v[i] = m;
       if (m == 0) {
         if (last_exists) {
-          buckets_v[i] = .{ .key_idx = @intCast(data_v.len), .key_len = undefined };
-        } else {
-          buckets_v[i] = .{ .key_idx = @intCast(data_v.len), .key_len = undefined };
+          buckets_v[i] = .{ .key_idx = @intCast(data_idx), .key_len = undefined };
         }
         last_exists = false;
       } else {
         const ks = hm.keys_string[k.idx..][0..k.len];
         const vs = hm.values_string.items[v.idx..][0..v.len];
-        buckets_v[i] = .{ .key_idx = @intCast(data_v.len), .key_len = @intCast(ks.len) };
-        @memcpy(data_v[0..ks.len], ks);
-        data_v = data_v[ks.len..];
-        @memcpy(data_v[0..vs.len], vs);
-        data_v = data_v[vs.len..];
+        buckets_v[i] = .{ .key_idx = @intCast(data_idx), .key_len = @intCast(ks.len) };
+        @memcpy(data_v[data_idx..][0..ks.len], ks);
+        data_idx += ks.len;
+        @memcpy(data_v[data_idx..][0..vs.len], vs);
+        data_idx += vs.len;
         last_exists = true;
       }
     }
+
+    buckets_v[buckets_v.len - 1] = .{ .key_idx = @intCast(data_idx), .key_len = undefined };
 
     return retval;
   }
@@ -506,18 +510,21 @@ const EnvType = struct {
   pub inline fn data(self: *const @This()) []const u8 { return self._meta[self.cap..][0..self._data_size]; }
   pub inline fn count(self: *const @This()) usize { return self.size; }
   pub inline fn capacity(self: *const @This()) usize { return self.cap; }
-  pub inline fn buckets(self: *const @This()) []const Bucket { return @ptrFromInt(@intFromPtr(self._meta) - (self.cap + 1) * @sizeOf(Bucket)); }
+  pub inline fn buckets(self: *const @This()) []const Bucket {
+    return @as([*]const Bucket, @ptrFromInt(@intFromPtr(self._meta) - (self.cap + 1) * @sizeOf(Bucket)))[0..self.cap+1];
+  }
   pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
 
   pub fn get(self: Self, key: []const u8) ?[]const u8 {
-    const hash, const fingerprint =   HashMap.getHFP(key);
+    const hash, const fingerprint = HashMap.getHFP(key);
     var i: usize = @intCast(hash & (self.cap - 1));
     const buckets_v = self.buckets();
+    const data_v = self.data();
     while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
       const bucket = buckets_v[i];
-      if (self.meta()[i] == fingerprint and std.mem.eql(u8, key, self.data[@intCast(bucket.key_idx)..][0..@intCast(bucket.key_len)])) {
+      if (self.meta()[i] == fingerprint and std.mem.eql(u8, key, data_v[@intCast(bucket.key_idx)..][0..@intCast(bucket.key_len)])) {
         const next = buckets_v[i + 1];
-        return self.data[0..@intCast(next.key_idx)][@intCast(bucket.key_idx)..][@intCast(bucket.key_len)..];
+        return data_v[0..@intCast(next.key_idx)][@intCast(bucket.key_idx)..][@intCast(bucket.key_len)..];
       }
     }
 
@@ -526,7 +533,9 @@ const EnvType = struct {
 
   /// Release the backing memory and invalidate this map.
   pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    allocator.free(@as([*]align(@alignOf(Bucket)) u8, @ptrCast(self.buckets().ptr))[0..self._data_size + self.cap * (1 + @sizeOf(Bucket))]);
+    const buckets_ptr = @as([*]align(@alignOf(Bucket)) u8, @ptrCast(@constCast(self.buckets().ptr)));
+    const allocation_size = (self.cap + 1) * @sizeOf(Bucket) + self.cap + self._data_size;
+    allocator.free(buckets_ptr[0..allocation_size]);
     self._meta = undefined;
     self._data_size = undefined;
   }
@@ -900,7 +909,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         try self.map.put(key, .{ .idx = value_idx, .len = self.map.values_string.items.len - value_idx });
       }
 
-      return .fromHashMap(self.map);
+      return try .fromHashMap(&self.map);
     }
 
     fn deinit(self: *@This()) void {
