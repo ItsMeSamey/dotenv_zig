@@ -14,6 +14,9 @@ pub const ParseOptions = struct {
 
   const Self = @This();
 
+  /// This is the default logging function
+  /// It generates a compile log statement at comptime
+  /// It logs to stderr (unbuffered) at runtime
   pub const DefaultLogFn = struct {
     fn log_fn(comptime format: []const u8, args: anytype) void {
       if (@inComptime()) {
@@ -24,10 +27,15 @@ pub const ParseOptions = struct {
     }
   }.log_fn;
 
+  /// No-op logging function
+  /// This does NOT log to @compileLog and does not cause a compile error directly.
+  /// At comptime, the parsing function will return an error that can be handled as well
   pub const NopLogFn = struct {
     fn log_fn(comptime _: []const u8, _: anytype) void {}
   }.log_fn;
 
+  /// The default function to determine if the first character of a key is valid
+  /// matches [a-zA-Z_]
   pub const DefaultIsValidFirstKeyChar = struct {
     fn is_valid_first_key_char(self: Self, char: u8) bool {
       const is_valid = std.ascii.isAlphabetic(char) or char == '_';
@@ -36,6 +44,8 @@ pub const ParseOptions = struct {
     }
   }.is_valid_first_key_char;
 
+  /// The default function to determine if any other character of a key is valid
+  /// matches [a-zA-Z0-9_]
   pub const DefaultIsValidKeyChar = struct {
     fn is_valid_key_char(self: Self, char: u8) bool {
       const is_valid = std.ascii.isAlphanumeric(char) or char == '_';
@@ -44,15 +54,12 @@ pub const ParseOptions = struct {
     }
   }.is_valid_key_char;
 
-  pub const Istring = packed struct {
-    idx: u32,
-    len: u32,
-  };
-
+  /// Just a helper to call the function, for internal use only
   fn is_valid_first_key_char(self: @This(), char: u8) bool {
     return self.is_valid_first_key_char_fn(self, char);
   }
 
+  /// Just a helper to call the function, for internal use only
   fn is_valid_key_char(self: @This(), char: u8) bool {
     return self.is_valid_key_char_fn(self, char);
   }
@@ -88,12 +95,14 @@ pub const ParseValueError = error{
 
 pub const ParseError = ParseValueError || std.fs.File.OpenError || std.fs.File.ReadError;
 
-// Read and parse the `.env` file to a HashMap
+// Read and parse the `.env` file to a EnvType (hashmap)
+/// Caller owns the returned hashmap
 pub fn load(allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
   return loadFrom(".env", allocator, options);
 }
 
-/// Read and parse the provided env file to a HashMap
+/// Read and parse the provided env file to a EnvType (hashmap)
+/// Caller owns the returned hashmap
 pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
   var file = try std.fs.cwd().openFile(file_name, .{});
   const file_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch |e| {
@@ -106,23 +115,23 @@ pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime op
   return loadFromData(file_data, allocator, options);
 }
 
-/// Read and parse the `.env` file to a StaticStringMap at comptime
+/// Read and parse the provided data string to a EnvType (hashmap)
+/// Caller owns the data memory and the returned hashmap
 pub fn loadFromData(data: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!EnvType {
   return GetParser(false, options).parse(data, allocator);
 }
 
-/// Parse `.env` file to a StaticStringMap at comptime
+// Read and parse the `.env` file to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
 pub fn loadComptime(options: ParseOptions) ParseValueError!ComptimeEnvType {
   return comptime loadFromComptime(".env", options);
 }
 
-/// Parse the provided .env file to a StaticStringMap at comptime
+/// Read and parse the provided env file to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
 pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseValueError!ComptimeEnvType {
   return comptime loadFromDataComptime(@embedFile(file_name), options);
 }
 
-/// Parses the provided `file_data` string to a StaticStringMap
-/// If a parsing error occurs, a compileError is emitted
+/// Read and parse the provided data string to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
 pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseValueError!ComptimeEnvType {
   return comptime GetParser(true, options).parse(file_data, comptime_allocator);
 }
@@ -162,6 +171,19 @@ pub const comptime_allocator: std.mem.Allocator = struct {
   }
 }.allocator;
 
+/// HashMap implementation used internally while parsing.
+/// This is used for key replacement (${...})
+/// This is a barebones implementation, it uses 8 bits for the fingerprint
+/// unlike the 7 in zig's standard hashmap because we don't require toombstones
+///
+/// I chose to use write this instead of using the standard hashmap because
+/// the standard implementation does not work at comptime, and has toombstones
+/// which are not needed for this use case. We would need to use a context variant
+/// of the hash map to prevent a new allocation for each value and it would result
+/// in same amount of bloat more or less. Besides, this implementation should be
+/// slightly faster (hopefully;) and works at comptime as well. Also, converting
+/// the standard to ComptimeEnvType / EnvType would need rehashing which this
+/// implementation does not need.
 pub const HashMap = struct {
   const Self = @This();
   pub const String = packed struct{ idx: usize, len: usize };
@@ -289,23 +311,36 @@ pub const HashMap = struct {
 
   pub fn deinit(self: *Self) void {
     self.allocator.free(self.allocation());
+    self._keys = undefined;
+    self._values = undefined;
+    self._meta = undefined;
     self.values_string.deinit(self.allocator);
+    self.values_string = undefined;
   }
 };
 
+/// A type to store the parsed data at comptime, this uses `const` everything to bypass the
+/// "runtime values can't hold a reference to a comptime variable" error.
+/// 
+/// This struct has a smaller size that the HashMap and does not have unused sections in the
+/// string (see comment in `fromHashMap`).
+/// The key + value size is also reduced to 8 bytes compared to 4*usize (32 if usize = 8) for the HashMap.
 pub const ComptimeEnvType = struct {
   const Self = @This();
   const Size = u32;
   pub const KV = HashMap.KV;
-  pub const Bucket = struct {key_idx: u40, key_len: u24};
+  pub const Bucket = struct {
+    key_idx: KeyIdxType,
+    key_len: KeyLenType,
+    const KeyIdxType = std.meta.Int(.unsigned, @min(@bitSizeOf(usize), 40));
+    const KeyLenType = std.meta.Int(.unsigned, if (@bitSizeOf(usize) < 40) @bitSizeOf(usize) else 24);
+  };
 
   data: []const u8 = &.{},
   _buckets: [*]const Bucket = &.{},
   _meta: [*]const u8 = &.{},
   cap: Size = 0,
   size: Size = 0,
-
-  const getHFP = HashMap.getHFP;
 
   pub fn fromHashMap(hm: HashMap) Self {
     @setEvalBranchQuota(1000_000);
@@ -327,6 +362,8 @@ pub const ComptimeEnvType = struct {
         const ks = hm.keys_string[k.idx..][0..k.len];
         const vs = hm.values_string.items[v.idx..][0..v.len];
         buckets_v = buckets_v ++ &[_]Bucket{ .{ .key_idx = @intCast(self.data.len), .key_len = @intCast(ks.len) } };
+        // we re-append to the data because we if any key was overwrite, there would be a unused value string that
+        // would not get GC'd (last tested with zig-0.15.1)
         self.data = self.data ++ ks ++ vs;
         last_exists = true;
       }
@@ -368,7 +405,7 @@ pub const ComptimeEnvType = struct {
   pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
 
   pub fn get(self: Self, key: []const u8) ?[]const u8 {
-    const hash, const fingerprint = getHFP(key);
+    const hash, const fingerprint = HashMap.getHFP(key);
     var i: usize = @intCast(hash & (self.cap - 1));
     while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
       const bucket = self.buckets()[i];
@@ -383,29 +420,115 @@ pub const ComptimeEnvType = struct {
 };
 
 const EnvType = struct {
+  const Self = @This();
+  const Size = u32;
+  pub const KV = HashMap.KV;
+  pub const Bucket = ComptimeEnvType.Bucket;
   /// The underlying string map
-  map: HashMap,
+  _meta: [*]u8 = &.{},
+  _data_size: usize = 0,
+  size: Size = 0,
+  cap: Size = 0,
 
   fn fromHashMap(hm: HashMap) @This() {
-    return @This(){ .map = hm };
+    const allocation_size = hm.cap * (1 + @sizeOf(Bucket)) + @sizeOf(Bucket) + hm.keys_string_len + hm.values_string.items.len;
+    const hm_allocation = hm.allocation();
+    var allocation: []align(@alignOf(Bucket)) u8 = undefined;
+
+    if (hm_allocation.len < allocation_size) {
+      if (hm.allocator.resize()) {
+        allocation = hm_allocation.ptr[0..allocation_size];
+      } else {
+        allocation = try hm.allocator.alignedAlloc(u8, @alignOf(Bucket), allocation_size);
+      }
+    }
+
+    var retval: @This() = .{
+      ._meta = allocation[0..hm.cap * @sizeOf(Bucket)].ptr,
+      ._data_size =  hm.keys_string_len + hm.values_string.items.len,
+      .size = hm.size,
+      .cap = hm.cap,
+    };
+
+    const buckets_v = retval.buckets();
+    const meta_v = retval.meta();
+    var data_v = retval.data();
+    var last_exists = false;
+
+    for (hm.meta(), hm.keys(), hm.values(), 0..) |m, k, v, i| {
+      meta_v[i] = m;
+      if (m == 0) {
+        if (last_exists) {
+          buckets_v[i] = .{ .key_idx = @intCast(data_v.len), .key_len = undefined };
+        } else {
+          buckets_v[i] = .{ .key_idx = @intCast(data_v.len), .key_len = undefined };
+        }
+        last_exists = false;
+      } else {
+        const ks = hm.keys_string[k.idx..][0..k.len];
+        const vs = hm.values_string.items[v.idx..][0..v.len];
+        buckets_v[i] = .{ .key_idx = @intCast(data_v.len), .key_len = @intCast(ks.len) };
+        @memcpy(data_v[0..ks.len], ks);
+        data_v = data_v[ks.len..];
+        @memcpy(data_v[0..vs.len], vs);
+        data_v = data_v[vs.len..];
+        last_exists = true;
+      }
+    }
+
+    return retval;
   }
 
-  /// Finds the value associated with a key in the map
-  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
-    return self.map.get(key);
+  pub const Iterator = struct {
+    buckets: [*]const Bucket,
+    meta: [*]const u8,
+    data: [*]const u8,
+    cap: Size,
+    i: Size = 0,
+
+    pub fn next(it: *Iterator) ?KV {
+      if (it.i >= it.cap) return null;
+      while (it.i < it.cap) {
+        defer it.i += 1;
+        if (it.meta[0..it.cap][it.i] == 0) continue;
+        const bucket = it.buckets[0..it.cap][it.i];
+        const next_bucket = it.buckets[0..it.cap][it.i + 1];
+        return .{
+          .key = it.data[@intCast(bucket.key_idx)..][0..@intCast(bucket.key_len)],
+          .value = it.data[0..@intCast(next_bucket.key_idx)][@intCast(bucket.key_idx)..][@intCast(bucket.key_len)..]
+        };
+      }
+      return null;
+    }
+  };
+
+  pub fn iterator(self: *const Self) Iterator { return .{ .buckets = self.buckets(), .meta = self.meta(), .data = self.data(), .cap = self.cap }; }
+  pub inline fn data(self: *const @This()) []const u8 { return self._meta[self.cap..][0..self._data_size]; }
+  pub inline fn count(self: *const @This()) usize { return self.size; }
+  pub inline fn capacity(self: *const @This()) usize { return self.cap; }
+  pub inline fn buckets(self: *const @This()) []const Bucket { return @ptrFromInt(@intFromPtr(self._meta) - (self.cap + 1) * @sizeOf(Bucket)); }
+  pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
+
+  pub fn get(self: Self, key: []const u8) ?[]const u8 {
+    const hash, const fingerprint =   HashMap.getHFP(key);
+    var i: usize = @intCast(hash & (self.cap - 1));
+    const buckets_v = self.buckets();
+    while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
+      const bucket = buckets_v[i];
+      if (self.meta()[i] == fingerprint and std.mem.eql(u8, key, self.data[@intCast(bucket.key_idx)..][0..@intCast(bucket.key_len)])) {
+        const next = buckets_v[i + 1];
+        return self.data[0..@intCast(next.key_idx)][@intCast(bucket.key_idx)..][@intCast(bucket.key_len)..];
+      }
+    }
+
+    return null;
   }
 
-  /// Release the backing array and invalidate this map.
-  /// This does *not* deinit keys, values, or the context!
-  /// If your keys or values need to be released, ensure
-  /// that that is done before calling this function.
+  /// Release the backing memory and invalidate this map.
   pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    _ = allocator;
-    defer self.map.deinit();
-  }
-
-  pub fn count(self: *const @This()) usize {
-    return self.map.size;
+    allocator.free(@as([*]align(@alignOf(Bucket)) u8, @ptrCast(self.buckets().ptr))[0..self._data_size + self.cap * (1 + @sizeOf(Bucket))]);
+    self._meta = undefined;
+    self._data_size = undefined;
   }
 };
 
