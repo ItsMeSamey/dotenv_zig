@@ -615,10 +615,6 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       return self.map.keys_string[self.at];
     }
 
-    fn currentU9(self: *@This()) u9 {
-      return self.current() orelse 0x100;
-    }
-
     fn last(self: *@This()) u8 {
       std.debug.assert(self.at != 0);
       return self.map.keys_string[self.at - 1];
@@ -644,10 +640,6 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       }
     }
 
-    fn skip(self: *@This(), comptime char: u8) void {
-      self.skipAny(std.fmt.comptimePrint("{c}", .{char}));
-    }
-    
     fn skipAny(self: *@This(), comptime chars: []const u8) void {
       while (self.at < self.map.keys_string.len and isOneOf(self.current().?, chars)) {
         self.at += 1;
@@ -928,7 +920,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!if(in_comptime) ComptimeEnvType else EnvType {
       @setEvalBranchQuota(1000_000);
       var self: @This() = .{ .map = try .init(data, 32, allocator) };
-      defer self.deinit();
+      defer self.map.deinit();
 
       while (try self.parseKey()) |key| {
         const value_idx = self.map.values_string.items.len;
@@ -937,10 +929,6 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       }
 
       return try .fromHashMap(&self.map);
-    }
-
-    fn deinit(self: *@This()) void {
-      self.map.deinit();
     }
   };
 }
