@@ -185,7 +185,6 @@ pub const comptime_allocator: std.mem.Allocator = struct {
 /// the standard to ComptimeEnvType / EnvType would need rehashing which this
 /// implementation does not need.
 pub const HashMap = struct {
-  const Self = @This();
   const Size = u32;
   pub const String = packed struct{ idx: usize, len: usize };
   pub const KV = struct { key: []const u8, value: []const u8 };
@@ -217,7 +216,7 @@ pub const HashMap = struct {
   pub inline fn values(self: *const @This()) []String { return self._values[0..self.cap]; }
   pub inline fn meta(self: *const @This()) []u8 { return self._meta[0..self.cap]; }
 
-  pub fn init(keys_string: []const u8, cap: Size, allocator: std.mem.Allocator) !Self {
+  pub fn init(keys_string: []const u8, cap: Size, allocator: std.mem.Allocator) !@This() {
     @setEvalBranchQuota(1000_000);
     const c = std.math.ceilPowerOfTwo(Size, cap) catch 16;
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(String), (2 * @sizeOf(String) + 1) * c);
@@ -306,11 +305,11 @@ pub const HashMap = struct {
     self.* = new;
   }
 
-  fn allocation(self: *Self) []align(@alignOf(String)) u8 {
+  fn allocation(self: *@This()) []align(@alignOf(String)) u8 {
     return @as([*] align(@alignOf(String)) u8, @alignCast(@ptrCast(self._keys)))[0.. (2 * @sizeOf(String) + 1) * self.cap];
   }
 
-  pub fn deinit(self: *Self) void {
+  pub fn deinit(self: *@This()) void {
     self.allocator.free(self.allocation());
     self._keys = undefined;
     self._values = undefined;
@@ -343,7 +342,7 @@ pub const ComptimeEnvType = struct {
   cap: Size = 0,
   size: Size = 0,
 
-  pub fn fromHashMap(hm: *HashMap) error{}!Self {
+  pub fn fromHashMap(hm: *HashMap) error{}!@This() {
     @setEvalBranchQuota(1000_000);
     var self: @This() = .{ .cap = hm.cap, .size = hm.size };
     var buckets_v: []const Bucket = &.{};
@@ -399,13 +398,13 @@ pub const ComptimeEnvType = struct {
     }
   };
 
-  pub fn iterator(self: *const Self) Iterator { return .{ .map = self }; }
+  pub fn iterator(self: *const @This()) Iterator { return .{ .map = self }; }
   pub inline fn count(self: *const @This()) usize { return self.size; }
   pub inline fn capacity(self: *const @This()) usize { return self.cap; }
   pub inline fn buckets(self: *const @This()) []const Bucket { return self._buckets[0..self.cap+1]; }
   pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
 
-  pub fn get(self: Self, key: []const u8) ?[]const u8 {
+  pub fn getRuntime(self: *const @This(), key: []const u8) ?[]const u8 {
     const hash, const fingerprint = HashMap.getHFP(key);
     var i: usize = @intCast(hash & (self.cap - 1));
     while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
@@ -418,13 +417,24 @@ pub const ComptimeEnvType = struct {
 
     return null;
   }
+
+  pub fn get(comptime self: *const @This(), comptime key: []const u8) ?[]const u8 {
+    return comptime self.getRuntime(key);
+  }
+
+  pub fn deinit(self: *@This()) void {
+    if (!@inComptime()) @compileError("deinit on a comptime map must only be called at comptime");
+    self.data = undefined;
+    self._buckets  = undefined;
+    self._meta = undefined;
+  }
 };
 
 const EnvType = struct {
-  const Self = @This();
   const Size = u32;
   pub const KV = HashMap.KV;
   pub const Bucket = ComptimeEnvType.Bucket;
+
   /// The underlying string map
   _meta: [*]u8 = &.{},
   _data_size: usize = 0,
@@ -496,7 +506,7 @@ const EnvType = struct {
     }
   };
 
-  pub fn iterator(self: *const Self) Iterator { return .{ .buckets = self.buckets(), .meta = self.meta(), .data = self.data(), .cap = self.cap }; }
+  pub fn iterator(self: *const @This()) Iterator { return .{ .buckets = self.buckets(), .meta = self.meta(), .data = self.data(), .cap = self.cap }; }
   pub inline fn data(self: *const @This()) []const u8 { return self._meta[self.cap..][0..self._data_size]; }
   pub inline fn count(self: *const @This()) usize { return self.size; }
   pub inline fn capacity(self: *const @This()) usize { return self.cap; }
@@ -505,7 +515,7 @@ const EnvType = struct {
   }
   pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
 
-  pub fn get(self: Self, key: []const u8) ?[]const u8 {
+  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
     const hash, const fingerprint = HashMap.getHFP(key);
     var i: usize = @intCast(hash & (self.cap - 1));
     const buckets_v = self.buckets();
@@ -956,7 +966,8 @@ test loadFrom {
     }
   };
 
-  _ = GetTests(TestFns.loadFn, TestFns.deinitFn);
+  const tests = GetTests(TestFns.loadFn, TestFns.deinitFn);
+  runTests(false, tests);
 }
 
 test loadFromComptime {
@@ -976,20 +987,40 @@ test loadFromComptime {
   try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
 
-  const TestFns = struct {
-    fn loadFn(comptime data: []const u8, comptime options: ParseOptions) ParseError!ComptimeEnvType {
-      return comptime loadFromDataComptime(data, options);
-    }
-
+  const tests = comptime GetTests(loadFromDataComptime, struct {
     fn deinitFn(_: *ComptimeEnvType) void {}
-  };
-
-  _ = GetTests(TestFns.loadFn, TestFns.deinitFn);
+  }.deinitFn);
+  comptime runTests(true, tests);
 }
+
+fn runTests(comptime in_comptime: bool, comptime T: type) void {
+  inline for (@typeInfo(T).@"struct".decls) |f| {
+    _ = struct {
+      test {
+        if (!in_comptime) {
+          @field(T, f.name)() catch |e| {
+            std.debug.print("TEST FAILED: {s}\n", .{f.name});
+            return e;
+          };
+        } else {
+          comptime {
+            @field(T, f.name)() catch |e| {
+              @compileError(std.fmt.comptimePrint("TEST \"{s}\": {any}\n", .{f.name, e}));
+            };
+          }
+        }
+      }
+    };
+  }
+}
+
+// test {
+//   comptime try std.testing.expectError(error.SomeError, "Not Error");
+// }
 
 fn GetTests(loadFn: anytype, deinitFn: anytype) type {
   return struct {
-    test "invalid first key character" {
+    pub fn @"invalid first key character"() !void {
       const test_data =
         \\ 1KEY=value
       ;
@@ -997,7 +1028,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidFirstKeyChar, err);
     }
 
-    test "invalid key character" {
+    pub fn @"invalid key character"() !void {
       const test_data =
         \\ KEY!=value
       ;
@@ -1005,7 +1036,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
     }
 
-    test "unterminated double quote" {
+    pub fn @"unterminated double quote"() !void {
       const test_data =
         \\ KEY="unterminated value
       ;
@@ -1013,7 +1044,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.UnterminatedQuote, err);
     }
 
-    test "unterminated single quote" {
+    pub fn @"unterminated single quote"() !void {
       const test_data =
         \\ KEY='unterminated value
       ;
@@ -1021,7 +1052,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.UnterminatedQuote, err);
     }
 
-    test "invalid escape sequence in double quotes" {
+    pub fn @"invalid escape sequence in double quotes"() !void {
       const test_data =
         \\ KEY="val\zue"
       ;
@@ -1029,7 +1060,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidEscapeSequence, err);
     }
 
-    test "invalid hex escape in double quotes" {
+    pub fn @"invalid hex escape in double quotes"() !void {
       const test_data =
         \\ KEY="val\xg12"
       ;
@@ -1037,7 +1068,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidEscapeSequence, err);
     }
 
-    test "valid hex escape in double quotes" {
+    pub fn @"valid hex escape in double quotes"() !void {
       const test_data =
         \\ KEY="val\xFFue"
       ;
@@ -1046,7 +1077,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val\xFFue", parsed.get("KEY").?);
     }
 
-    test "substitution key not found" {
+    pub fn @"substitution key not found"() !void {
       const test_data =
         \\ KEY=${MISSING}
       ;
@@ -1054,7 +1085,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.SubstitutionKeyNotFound, err);
     }
 
-    test "substitution in single quotes does not expand" {
+    pub fn @"substitution in single quotes does not expand"() !void {
       const test_data =
         \\ HOST=world
         \\ KEY='${HOST}'
@@ -1064,7 +1095,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("${HOST}", parsed.get("KEY").?);
     }
 
-    test "substitution outside double quotes" {
+    pub fn @"substitution outside double quotes"() !void {
       const test_data =
         \\ HOST=world
         \\ KEY=unquoted${HOST}
@@ -1074,14 +1105,14 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("unquotedworld", parsed.get("KEY").?);
     }
 
-    test "empty file" {
+    pub fn @"empty file"() !void {
       const test_data = "";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
       try std.testing.expectEqual(@as(usize, 0), parsed.count());
     }
 
-    test "only comments" {
+    pub fn @"only comments"() !void {
       const test_data =
         \\ # Comment line 1
         \\# Comment line 2
@@ -1092,7 +1123,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqual(@as(usize, 0), parsed.count());
     }
 
-    test "inline comment trims trailing space" {
+    pub fn @"inline comment trims trailing space"() !void {
       const test_data =
         \\ KEY=val # comment
         \\ KEY2=val2   # comment with spaces
@@ -1103,7 +1134,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val2", parsed.get("KEY2").?);
     }
 
-    test "unquoted value trims leading and trailing spaces" {
+    pub fn @"unquoted value trims leading and trailing spaces"() !void {
       const test_data =
         \\ KEY= val 
         \\ KEY2 =  va l  
@@ -1114,7 +1145,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va l", parsed.get("KEY2").?);
     }
 
-    test "unquoted value preserves interior spaces" {
+    pub fn @"unquoted value preserves interior spaces"() !void {
       const test_data =
         \\ KEY=va l
       ;
@@ -1123,7 +1154,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va l", parsed.get("KEY").?);
     }
 
-    test "single quotes preserve escapes literally" {
+    pub fn @"single quotes preserve escapes literally"() !void {
       const test_data =
         \\ KEY='va\nl'
       ;
@@ -1132,7 +1163,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va\\nl", parsed.get("KEY").?);
     }
 
-    test "double quotes expand newline escape" {
+    pub fn @"double quotes expand newline escape"() !void {
       const test_data =
         \\ KEY="va\nl"
       ;
@@ -1142,7 +1173,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "double quotes handle backslash escape" {
+    pub fn @"double quotes handle backslash escape"() !void {
       const test_data =
         \\ KEY="va\\nl"
       ;
@@ -1151,7 +1182,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va\\nl", parsed.get("KEY").?);
     }
 
-    test "double quotes handle quote escape" {
+    pub fn @"double quotes handle quote escape"() !void {
       const test_data =
         \\ KEY="va\"nl"
       ;
@@ -1160,7 +1191,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va\"nl", parsed.get("KEY").?);
     }
 
-    test "multiline literal in double quotes" {
+    pub fn @"multiline literal in double quotes"() !void {
       const test_data =
         \\ KEY="Multi
         \\line
@@ -1172,7 +1203,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "export prefix not handled (parses as invalid key)" {
+    pub fn @"export prefix not handled (parses as invalid key)"() !void {
       const test_data =
         \\ export KEY=value
       ;
@@ -1180,7 +1211,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
     }
 
-    test "unexpected end of file in key" {
+    pub fn @"unexpected end of file in key"() !void {
       const test_data =
         \\ KEY
       ;
@@ -1188,7 +1219,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.UnexpectedEndOfFile, err);
     }
 
-    test "unexpected character after key" {
+    pub fn @"unexpected character after key"() !void {
       const test_data =
         \\ KEY? = value
       ;
@@ -1196,7 +1227,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
     }
 
-    test "duplicate keys overwrite with last value" {
+    pub fn @"duplicate keys overwrite with last value"() !void {
       const test_data =
         \\ KEY=first
         \\ KEY=second
@@ -1206,7 +1237,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("second", parsed.get("KEY").?);
     }
 
-    test "windows line endings are handled" {
+    pub fn @"windows line endings are handled"() !void {
       const test_data = "KEY=value\r\nKEY2= value2 \r\n";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
@@ -1214,7 +1245,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("value2", parsed.get("KEY2").?);
     }
 
-    test "double quotes expand carriage return escape" {
+    pub fn @"double quotes expand carriage return escape"() !void {
       const test_data =
         \\ KEY="va\rl"
       ;
@@ -1224,7 +1255,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "double quotes expand tab escape" {
+    pub fn @"double quotes expand tab escape"() !void {
       const test_data =
         \\ KEY="va\tl"
       ;
@@ -1234,7 +1265,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "double quotes expand vertical tab escape" {
+    pub fn @"double quotes expand vertical tab escape"() !void {
       const test_data =
         \\ KEY="va\vl"
       ;
@@ -1244,7 +1275,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "double quotes expand form feed escape" {
+    pub fn @"double quotes expand form feed escape"() !void {
       const test_data =
         \\ KEY="va\fl"
       ;
@@ -1254,7 +1285,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "unterminated substitution block" {
+    pub fn @"unterminated substitution block"() !void {
       const test_data =
         \\ KEY=${UNTERMINATED
       ;
@@ -1262,7 +1293,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.UnterminatedSubstitutionBlock, err);
     }
 
-    test "substitution key with invalid character" {
+    pub fn @"substitution key with invalid character"() !void {
       const test_data =
         \\ KEY=valid
         \\ URL=http://${KEY}${KEY!}
@@ -1271,7 +1302,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidKeyChar, err);
     }
 
-    test "empty substitution key" {
+    pub fn @"empty substitution key"() !void {
       const test_data =
         \\ KEY=${}
       ;
@@ -1279,7 +1310,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidFirstKeyChar, err);
     }
 
-    test "value ends with newline in unquoted" {
+    pub fn @"value ends with newline in unquoted"() !void {
       const test_data = 
         \\KEY=value\n
       ;
@@ -1288,7 +1319,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("value\\n", parsed.get("KEY").?);
     }
 
-    test "inline comment without space is parsed" {
+    pub fn @"inline comment without space is parsed"() !void {
       const test_data =
         \\ KEY=val#comment
       ;
@@ -1297,7 +1328,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
     }
 
-    test "quoted values preserve trailing spaces" {
+    pub fn @"quoted values preserve trailing spaces"() !void {
       const test_data =
         \\ KEY="val "
       ;
@@ -1306,7 +1337,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val ", parsed.get("KEY").?);
     }
 
-    test "single quotes handle escaped single quote" {
+    pub fn @"single quotes handle escaped single quote"() !void {
       const test_data =
         \\ KEY='va\'l'
       ;
@@ -1315,7 +1346,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va'l", parsed.get("KEY").?);
     }
 
-    test "double quotes handle hex escape with lowercase" {
+    pub fn @"double quotes handle hex escape with lowercase"() !void {
       const test_data =
         \\ KEY="val\xffue"
       ;
@@ -1324,7 +1355,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val\xFFue", parsed.get("KEY").?);
     }
 
-    test "single quotes does not parse hex char" {
+    pub fn @"single quotes does not parse hex char"() !void {
       const test_data =
         \\ KEY='val\xg12'
       ;
@@ -1333,7 +1364,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val\\xg12", parsed.get("KEY").?);
     }
 
-    test "double quotes escaped dollar" {
+    pub fn @"double quotes escaped dollar"() !void {
       const test_data =
         \\ KEY="va\${l}"
       ;
@@ -1342,7 +1373,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va${l}", parsed.get("KEY").?);
     }
 
-    test "substitution in multiline double quotes" {
+    pub fn @"substitution in multiline double quotes"() !void {
       const test_data =
         \\ HOST=world
         \\ KEY="Multi
@@ -1355,21 +1386,21 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "whitespace only lines are skipped" {
+    pub fn @"whitespace only lines are skipped"() !void {
       const test_data = "   \t \nKEY=value";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
       try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
     }
 
-    test "unquoted value with tab trims" {
+    pub fn @"unquoted value with tab trims"() !void {
       const test_data = "KEY=\tval\t";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
       try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
     }
 
-    test "quoted value with interior tab preserved" {
+    pub fn @"quoted value with interior tab preserved"() !void {
       const test_data = "KEY=\"va\tl\"";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
@@ -1377,14 +1408,14 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(expected, parsed.get("KEY").?);
     }
 
-    test "trailing newline in file" {
+    pub fn @"trailing newline in file"() !void {
       const test_data = "KEY=value\n";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
       try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
     }
 
-    test "key starting with underscore" {
+    pub fn @"key starting with underscore"() !void {
       const test_data =
         \\ _KEY=value
       ;
@@ -1393,14 +1424,14 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("value", parsed.get("_KEY").?);
     }
 
-    test "value with only whitespace trims to empty" {
+    pub fn @"value with only whitespace trims to empty"() !void {
       const test_data = "KEY=   \t";
       var parsed = try loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       defer deinitFn(&parsed);
       try std.testing.expectEqualStrings("", parsed.get("KEY").?);
     }
 
-    test "partial hex escape errors" {
+    pub fn @"partial hex escape errors"() !void {
       const test_data =
         \\ KEY="val\xG"
       ;
@@ -1408,7 +1439,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.InvalidEscapeSequence, err);
     }
 
-    test "escaped newline in single quotes literal" {
+    pub fn @"escaped newline in single quotes literal"() !void {
       const test_data =
         \\ KEY='va\nl'
       ;
@@ -1417,7 +1448,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va\\nl", parsed.get("KEY").?);
     }
 
-    test "substitution key with digits" {
+    pub fn @"substitution key with digits"() !void {
       const test_data =
         \\ KEY123=val
         \\ URL=${KEY123}
@@ -1427,7 +1458,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val", parsed.get("URL").?);
     }
 
-    test "inline comment after quoted value" {
+    pub fn @"inline comment after quoted value"() !void {
       const test_data =
         \\ KEY="val" # comment
       ;
@@ -1436,7 +1467,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val", parsed.get("KEY").?);
     }
 
-    test "key with multiple = parses first" {
+    pub fn @"key with multiple = parses first"() !void {
       const test_data =
         \\ KEY=val=more
       ;
@@ -1445,7 +1476,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val=more", parsed.get("KEY").?);
     }
 
-    test "escaped quote inside single quotes" {
+    pub fn @"escaped quote inside single quotes"() !void {
       const test_data =
         \\ KEY='va\'\'l'
       ;
@@ -1454,7 +1485,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va''l", parsed.get("KEY").?);
     }
 
-    test "unquoted value ending with backslash literal" {
+    pub fn @"unquoted value ending with backslash literal"() !void {
       const test_data =
         \\ KEY=val\\
       ;
@@ -1463,7 +1494,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val\\", parsed.get("KEY").?);
     }
 
-    test "substitution EOF in key" {
+    pub fn @"substitution EOF in key"() !void {
       const test_data =
         \\ KEY=${UNFINISHED
       ;
@@ -1471,7 +1502,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectError(ParseValueError.UnterminatedSubstitutionBlock, err);
     }
 
-    test "no value after =" {
+    pub fn @"no value after ="() !void {
       const test_data =
         \\ KEY=
       ;
@@ -1480,7 +1511,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("", parsed.get("KEY").?);
     }
 
-    test "comment after whitespace" {
+    pub fn @"comment after whitespace"() !void {
       const test_data =
         \\ KEY=value   # comment
       ;
@@ -1489,7 +1520,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("value", parsed.get("KEY").?);
     }
 
-    test "quoted value with leading space preserved" {
+    pub fn @"quoted value with leading space preserved"() !void {
       const test_data =
         \\ KEY=" val "
       ;
@@ -1498,7 +1529,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings(" val ", parsed.get("KEY").?);
     }
 
-    test "single quotes with backslash literal" {
+    pub fn @"single quotes with backslash literal"() !void {
       const test_data =
         \\ KEY='va\\l'
       ;
@@ -1507,7 +1538,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("va\\l", parsed.get("KEY").?);
     }
 
-    test "hex escape at end of value" {
+    pub fn @"hex escape at end of value"() !void {
       const test_data =
         \\ KEY="val\xFF"
       ;
@@ -1516,13 +1547,13 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("val\xFF", parsed.get("KEY").?);
     }
 
-    test "unexpected characters after quoted value" {
+    pub fn @"unexpected characters after quoted value"() !void {
       const test_data = "KEY=\"value\" extra";
       const err = loadFn(test_data, .{ .log_fn = ParseOptions.NopLogFn });
       try std.testing.expectError(ParseValueError.UnexpectedCharacter, err);
     }
 
-    test "unquoted value with accented characters" {
+    pub fn @"unquoted value with accented characters"() !void {
       const test_data =
         \\ KEY=café
       ;
@@ -1531,7 +1562,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("café", parsed.get("KEY").?);
     }
 
-    test "double quoted value with emoji" {
+    pub fn @"double quoted value with emoji"() !void {
       const test_data =
         \\ KEY="Hello 😊 World"
       ;
@@ -1540,7 +1571,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("Hello 😊 World", parsed.get("KEY").?);
     }
 
-    test "single quoted value with Chinese characters" {
+    pub fn @"single quoted value with Chinese characters"() !void {
       const test_data =
         \\ KEY='你好世界'
       ;
@@ -1549,7 +1580,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("你好世界", parsed.get("KEY").?);
     }
 
-    test "unquoted value with Cyrillic" {
+    pub fn @"unquoted value with Cyrillic"() !void {
       const test_data =
         \\ KEY=Привет
       ;
@@ -1558,7 +1589,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("Привет", parsed.get("KEY").?);
     }
 
-    test "double quoted value with Arabic" {
+    pub fn @"double quoted value with Arabic"() !void {
       const test_data =
         \\ KEY="مرحبا بالعالم"
       ;
@@ -1567,7 +1598,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("مرحبا بالعالم", parsed.get("KEY").?);
     }
 
-    test "unquoted value with mixed UTF-8 and ASCII, interior em space" {
+    pub fn @"unquoted value with mixed UTF-8 and ASCII, interior em space"() !void {
       const test_data =
         \\ KEY=café world  # em space interior
       ;
@@ -1576,7 +1607,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("café world", parsed.get("KEY").?);
     }
 
-    test "substitution expands to UTF-8 value" {
+    pub fn @"substitution expands to UTF-8 value"() !void {
       const test_data =
         \\ GREETING=Hola
         \\ PLACE=México
@@ -1587,7 +1618,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("Hola desde México!", parsed.get("MSG").?);
     }
 
-    test "double quoted value with trailing zero-width space trimmed" {
+    pub fn @"double quoted value with trailing zero-width space trimmed"() !void {
       const test_data =
         \\ KEY="test"  # zero-width space
       ;
@@ -1596,7 +1627,7 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
       try std.testing.expectEqualStrings("test", parsed.get("KEY").?);
     }
 
-    test "unquoted value with Japanese" {
+    pub fn @"unquoted value with Japanese"() !void {
       const test_data =
         \\ KEY=こんにちは
       ;
