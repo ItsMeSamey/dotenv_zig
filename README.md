@@ -125,7 +125,15 @@ ESCAPE_SEQUENCES = "\xff\n\r\v\f" # Escapes unescaped (only in double quotes)
 MULTILINE_VALUE = "Multi
 line# NOT A COMMENT
     value"
+UNQUOTED_MULTILINE = Multi\
+line\
+    value # comments are allowed here but not after the `\`
 ```
+
+> [!NOTE]
+> Comments are not allowed after the \ character in unquoted values, or the newline will not be escaped.
+> ``UNQUOTED_MULTILINE = Multi\ #Comment`` will be parsed as `UNQUOTED_MULTILINE` = `Multi\`, then the next line will cause a parsing error.
+
 
 ## How it Works
 - **Keys**: Default key validation: First char is alphabetic or `_`; subsequent chars are alphanumeric or `_`.

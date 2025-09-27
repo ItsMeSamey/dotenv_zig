@@ -978,6 +978,9 @@ const ENV_TEST_STRING_1: []const u8 =
   \\MULTILINE_VALUE = "Multi
   \\line
   \\    value"
+  \\UNQUOTED_MULTILINE = Multi\
+  \\line\
+  \\    value # comments are allowed here but not after the `\`
 ;
 
 test loadFrom {
@@ -997,6 +1000,7 @@ test loadFrom {
   try std.testing.expectEqualStrings("${This Will Not Be Substitutes}", parsed.get("LITERAL").?);
   try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
+  try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("UNQUOTED_MULTILINE").?);
 
   const TestFns = struct {
     fn loadFn(comptime data: []const u8, comptime options: ParseOptions) ParseError!EnvType {
@@ -1028,6 +1032,7 @@ test loadFromComptime {
   try std.testing.expectEqualStrings("${This Will Not Be Substitutes}", parsed.get("LITERAL").?);
   try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
+  try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("UNQUOTED_MULTILINE").?);
 
   const tests = comptime GetTests(loadFromDataComptime, struct {
     fn deinitFn(_: *ComptimeEnvType) void {}
