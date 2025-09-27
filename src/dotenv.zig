@@ -606,51 +606,61 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     line: usize = 0,
     line_start: usize = 0,
 
+    /// Returns true if the whole string has been parsed
     fn done(self: *@This()) bool {
       return self.at >= self.map.keys_string.len;
     }
 
+    /// Returns the current character
     fn current(self: *@This()) ?u8 {
       if (self.done()) return null;
       return self.map.keys_string[self.at];
     }
 
+    /// Returns the current character, assert that it exists
     fn last(self: *@This()) u8 {
       std.debug.assert(self.at != 0);
       return self.map.keys_string[self.at - 1];
     }
 
+    /// Returns the current character and advances the pointer
     fn take(self: *@This()) ?u8 {
       if (self.done()) return null;
       self.at += 1;
       return self.last();
     }
 
+    /// Returns the current character (as u9) and advances the pointer
     fn takeU9(self: *@This()) u9 {
       return self.take() orelse 0x100;
     }
 
+    /// Skips all characters until the given character is found
     fn skipUpto(self: *@This(), comptime end: u8) void {
       self.skipUptoAny(std.fmt.comptimePrint("{c}", .{end}));
     }
 
+    /// Skips all characters until any of the given characters is found
     fn skipUptoAny(self: *@This(), comptime end: []const u8) void {
       while (self.at < self.map.keys_string.len and !isOneOf(self.current().?, end)) {
         self.at += 1;
       }
     }
 
+    /// Skips all characters that belong to the given chars set
     fn skipAny(self: *@This(), comptime chars: []const u8) void {
       while (self.at < self.map.keys_string.len and isOneOf(self.current().?, chars)) {
         self.at += 1;
       }
     }
 
+    /// Returns the current character as a slice (for printing)
     fn currentAsSlice(self: *@This()) []const u8 {
       std.debug.assert(self.at < self.map.keys_string.len);
       return self.map.keys_string[self.at..][0..1];
     }
 
+    /// Prints the error marker at the current position
     fn printErrorMarker(self: *@This()) void {
       const at = self.at;
       self.map.keys_string = self.map.keys_string[0.. @min(self.at + options.max_error_line_peek, self.map.keys_string.len)];
@@ -666,6 +676,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       }
     }
 
+    /// Parses the key
     fn parseKey(self: *@This()) ParseKeyError!?HashMap.String {
       // Skip any whitespace / comment lines, break at first non-whitespace character
       while (true) {
@@ -710,14 +721,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         return ParseKeyError.UnexpectedEndOfFile;
       }
 
+      // Index and length of the key inside the provided data (self.map.keys_string)
       const retval: HashMap.String = .{ .idx = @intCast(start), .len = @intCast(self.at - start) };
-      const c = self.take() orelse {
-        options.log_fn("Unexpected end of file, expected `=` ", .{});
-        self.printErrorMarker();
-        return ParseKeyError.UnexpectedEndOfFile;
-      };
-      if (c == '=') return retval;
 
+      // consume whitespace, then the = character
       self.skipAny(" \t\x0B");
       const end_char = self.take() orelse {
         options.log_fn("Unexpected end of file, expected `=` ", .{});
@@ -725,6 +732,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         return ParseKeyError.UnexpectedEndOfFile;
       };
 
+      // There must be an = character. orelse we return an error
       if (end_char == '=') return retval;
 
       options.log_fn("Got unexpected `{s}`, expected `=` ", .{escaped(end_char) orelse self.currentAsSlice()});
@@ -733,9 +741,9 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
 
     fn parseValue(self: *@This()) ParseValueError!void {
-      self.skipAny(" \t\x0B");
+      self.skipAny(" \t\x0B"); // skip any preceding whitespace
       if (self.current()) |c| {
-        return switch (c) {
+        return switch (c) { // check if the value is quoted or unquoted
           '\'' => self.parseQuotedValue('\''),
           '"' => self.parseQuotedValue('"'),
           '#' => {
@@ -748,27 +756,38 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       } else return;
     }
 
+    /// This function is called when out value is quted and we wanna remove the trailing whitespace
     fn trimResultEnd(self: *@This()) void {
       while (self.map.values_string.items.len > 0 and isOneOf(self.map.values_string.items[self.map.values_string.items.len - 1], " \t\x0B\r\x0C")) {
         self.map.values_string.items.len -= 1;
       }
     }
 
+    /// Unlike how the name suggests, this parses the unquoted value as well when quote_char is null
     fn parseQuotedValue(self: *@This(), comptime quote_char: ?u8) ParseValueError!void {
       if (quote_char) |qc| std.debug.assert(qc == self.take().?);
 
+      // This is used for logging only
       const quote_string = if (quote_char) |c| comptime std.fmt.comptimePrint(" quoted({c})", .{c}) else "";
 
+      // We use a switch block and not a while loop (cuz we don't need a while loop!)
+      // Keeps our code clean i think
+      // Since zig can't switch on ?u8, we convert it to a u9 and set it's value to 0x100 if it's null
+      // we then switch on the u9 to get effectively the same thing
       blk: switch (self.takeU9()) {
-        0x100 => {
+        0x100 => { // the data has been exhausted
+          // we can just return the value in unquoted case
           if (quote_char == null) break :blk;
 
+          // The quote was not closed, hence we return an error.
+          // We know this because on closing the quote, the switch block is exited and
+          // we could not have ended up here
           options.log_fn("Unexpected end of file while parsing a{s} value at ", .{quote_string});
           self.printErrorMarker();
           return ParseValueError.UnterminatedQuote;
         },
-        '\\' => {
-          switch (if (quote_char) |c| @as(u9, c) else 0x100) {
+        '\\' => { // Special logic for when we see a backslash
+          switch (if (quote_char) |c| @as(u9, c) else 0x100) { // switch on the quote_char
             0x100 => switch (self.takeU9()) {
               0x100 => continue :blk 0x100,
               '\\', '$' => |c| try self.map.values_string.append(self.map.allocator, @intCast(c)),
@@ -813,13 +832,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
 
                 try self.map.values_string.append(self.map.allocator, @intCast((decodeHex(hexa) << 4) | decodeHex(hexb)));
               },
-              '$' => try self.map.values_string.append(self.map.allocator, '$'),
-              '\"' => try self.map.values_string.append(self.map.allocator, '"'),
-              else => |c_u9| {
-                const c: u8 = @intCast(c_u9);
-
+              inline '$', '\"' => |c| try self.map.values_string.append(self.map.allocator, c),
+              else => |c_u9| { // This is Always and error since double quotes require proper escaping
                 options.log_fn("Unexpected escape sequence `\\{s}` in a{s} value at ", .{
-                  escaped(c) orelse self.currentAsSlice(), quote_string
+                  escaped(@intCast(c_u9)) orelse self.currentAsSlice(), quote_string
                 });
                 self.at -= 1;
                 self.printErrorMarker();
@@ -830,14 +846,14 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           }
           continue :blk self.takeU9();
         },
-        '$' => {
+        '$' => { // Try to parse the ${...} block
           const next = self.takeU9();
           if (quote_char == '\'' or next != '{') {
             try self.map.values_string.append(self.map.allocator, '$');
             continue :blk next;
           }
 
-          const start = self.at;
+          const start = self.at; // Start of the key, we don't strip whitespace in the block
           if (!options.is_valid_first_key_char(self.take() orelse {
             options.log_fn("Unexpected end of file while parsing {{}} in a{s} value at ", .{quote_string});
             self.printErrorMarker();
@@ -888,7 +904,8 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           try self.map.values_string.append(self.map.allocator, '\n');
           continue :blk self.takeU9();
         },
-        else => |c| {
+        else => |c_9| { // default case
+          const c: u8 = @intCast(c_9);
           if (quote_char) |qc| {
             if (c == qc) break :blk;
           } else if (c == '#') {
@@ -898,7 +915,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
           }
           if (quote_char != null and c == quote_char.?) break :blk;
 
-          try self.map.values_string.append(self.map.allocator, @intCast(c));
+          try self.map.values_string.append(self.map.allocator, c);
           continue :blk self.takeU9();
         },
       }
@@ -917,6 +934,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
       _ = self.take();
     }
 
+    /// Combined parsing function for both runtime and comptime
     fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!if(in_comptime) ComptimeEnvType else EnvType {
       @setEvalBranchQuota(1000_000);
       var self: @This() = .{ .map = try .init(data, 32, allocator) };
