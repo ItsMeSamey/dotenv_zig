@@ -131,8 +131,9 @@ line\
 ```
 
 > [!NOTE]
-> Comments are not allowed after the \ character in unquoted values, or the newline will not be escaped.
+> Comments are not allowed after the `\` character in unquoted values, or the newline will not be escaped.
 > ``UNQUOTED_MULTILINE = Multi\ #Comment`` will be parsed as `UNQUOTED_MULTILINE` = `Multi\`, then the next line will cause a parsing error.
+> If you put a space after the `\` character, the same will happen, the value will be parsed as a single line.
 
 
 ## How it Works
