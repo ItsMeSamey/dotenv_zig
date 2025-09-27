@@ -66,7 +66,7 @@ pub const ParseOptions = struct {
 };
 
 /// Errors specific to parsing keys
-const ParseKeyError = error{
+pub const ParseKeyError = error{
   /// Thrown when the first character of a key (or substitution key) is not alphabetic (a-zA-Z) or '_'
   InvalidFirstKeyChar,
   /// Thrown when a subsequent character in a key (or substitution key) is not alphanumeric (a-zA-Z0-9) or '_'
@@ -118,7 +118,9 @@ pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime op
 /// Read and parse the provided data string to a EnvType (hashmap)
 /// Caller owns the data memory and the returned hashmap
 pub fn loadFromData(data: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!EnvType {
-  return GetParser(false, options).parse(data, allocator);
+  var hm = try GetParser(options).parse(data, allocator);
+  defer hm.deinit();
+  return .fromHashMap(&hm);
 }
 
 // Read and parse the `.env` file to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
@@ -133,7 +135,8 @@ pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseValue
 
 /// Read and parse the provided data string to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
 pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseValueError!ComptimeEnvType {
-  return comptime GetParser(true, options).parse(file_data, comptime_allocator);
+  var hm = try GetParser(options).parse(file_data, comptime_allocator);
+  return comptime .fromHashMap(&hm);
 }
 
 // This is taken from https://github.com/ziglang/zig/issues/1291
@@ -348,7 +351,7 @@ pub const ComptimeEnvType = struct {
   size: Size = 0,
 
   /// Create a new ComptimeEnvType from a HashMap
-  pub fn fromHashMap(comptime hm: *HashMap) error{}!@This() {
+  pub fn fromHashMap(comptime hm: *HashMap) @This() {
     @setEvalBranchQuota(1000_000);
     comptime {
       var self: @This() = .{ .cap = hm.cap, .size = hm.size };
@@ -441,7 +444,7 @@ pub const ComptimeEnvType = struct {
 /// in a single allocation.
 /// 
 /// see comment for `ComptimeEnvType`
-const EnvType = struct {
+pub const EnvType = struct {
   const Size = u32;
   pub const KV = HashMap.KV;
   pub const Bucket = ComptimeEnvType.Bucket;
@@ -528,7 +531,9 @@ const EnvType = struct {
     }
   };
 
-  pub fn iterator(self: *const @This()) Iterator { return .{ .buckets = self.buckets(), .meta = self.meta(), .data = self.data(), .cap = self.cap }; }
+  pub fn iterator(self: *const @This()) Iterator {
+    return .{ .buckets = self.buckets().ptr, .meta = self.meta().ptr, .data = self.data().ptr, .cap = self.cap };
+  }
   pub inline fn data(self: *const @This()) []const u8 { return self._meta[self.cap..][0..self._data_size]; }
   pub inline fn count(self: *const @This()) usize { return self.size; }
   pub inline fn capacity(self: *const @This()) usize { return self.cap; }
@@ -599,7 +604,7 @@ inline fn decodeHex(char: u8) u8 {
   return HEX_DECODE_ARRAY[char - @as(usize, '0')];
 }
 
-fn GetParser(in_comptime: bool, options: ParseOptions) type {
+pub fn GetParser(options: ParseOptions) type {
   return struct {
     map: HashMap,
     at: usize = 0,
@@ -935,10 +940,10 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
     }
 
     /// Combined parsing function for both runtime and comptime
-    fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!if(in_comptime) ComptimeEnvType else EnvType {
+    fn parse(data: []const u8, allocator: std.mem.Allocator) ParseValueError!HashMap {
       @setEvalBranchQuota(1000_000);
       var self: @This() = .{ .map = try .init(data, 32, allocator) };
-      defer self.map.deinit();
+      errdefer self.map.deinit();
 
       while (try self.parseKey()) |key| {
         const value_idx = self.map.values_string.items.len;
@@ -946,7 +951,7 @@ fn GetParser(in_comptime: bool, options: ParseOptions) type {
         try self.map.put(key, .{ .idx = value_idx, .len = self.map.values_string.items.len - value_idx });
       }
 
-      return try .fromHashMap(&self.map);
+      return self.map;
     }
   };
 }

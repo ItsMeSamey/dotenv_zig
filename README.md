@@ -1,11 +1,11 @@
 # dotenv
-Load ENV vars from `.env` file.
-Supports zig `0.14.0`, `0.14.1` and `0.15.1`.
+Load ENV vars from `.env` file at runtime or comptime. As fast as my brain could handle.
+Tested with `0.15.1`, other versions may work as well.
 
 This library provides functions for loading environment variables from `.env` files at runtime.
 It supports unquoting and unescaping of string values (including substitutions like `${VAR}`), comments, multiline values, and flexible customization via `ParseOptions`.
 
-This library provides functions for loading and parsing environment variables from `.env` files at runtime.
+This library provides functions for loading and parsing environment variables from `.env` files both at runtime and at compile time.
 
 ## Installation
 
@@ -26,6 +26,11 @@ This is a microlibrary. The code is mostly straightforward. Consider simply copy
 It's only about 1k lines of code (including tests). The choice is yours.
 
 ## Usage
+Every function returns an immutable hashmap of key/value pairs.
+The library uses it's own version of hashmap (see comments in the source for reasoning).
+You can also get a mutable version by calling `dotenv.GetParser(options).parse(allocator, data)`.
+
+### Runtime Parsing
 
 ```zig
 const std = @import("std");
@@ -49,6 +54,25 @@ pub fn main() !void {
 }
 ```
 
+### Comptime Parsing
+
+every function for loading has a `Comptime` variant.
+
+```zig
+const std = @import("std");
+const env = @import("dotenv");
+
+// Loads the .env file at comptime
+const env = try env.loadComptime(options);
+
+// Access a value at comptime
+const db_url = env.get("DATABASE_URL") orelse "!fallback!";
+
+pub fn main() !void {
+  std.debug.print("DATABASE_URL: {s}\n", .{db_url});
+}
+```
+
 You can also load from a specific file or raw data:
 
 ```zig
@@ -58,6 +82,7 @@ var env = try dotenv.loadFrom("filename.env", allocator, .{});
 // From raw data (e.g., embedded or read elsewhere).
 const raw_data = "MY_VAR=value\n";
 var env = try dotenv.loadFromData(raw_data, allocator, .{});
+const env_comptime = comptime try dotenv.loadFromDataComptime(raw_data, allocator, .{});
 ```
 
 ### Iterating over Environment Variables
