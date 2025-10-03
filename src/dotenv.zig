@@ -1061,10 +1061,6 @@ fn runTests(comptime in_comptime: bool, comptime T: type) void {
   }
 }
 
-// test {
-//   comptime try std.testing.expectError(error.SomeError, "Not Error");
-// }
-
 fn GetTests(loadFn: anytype, deinitFn: anytype) type {
   return struct {
     pub fn @"invalid first key character"() !void {
