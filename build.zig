@@ -6,8 +6,8 @@ pub fn build(b: *std.Build) void {
 
   const dotenv = b.addModule("dotenv", .{
     .root_source_file = b.path("src/dotenv.zig"),
-      .target = target,
-      .optimize = optimize,
+    .target = target,
+    .optimize = optimize,
   });
 
   const tests = b.addTest(.{ .root_module = dotenv });
