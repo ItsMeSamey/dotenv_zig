@@ -10,7 +10,7 @@ This library provides functions for loading and parsing environment variables fr
 ## Installation
 
 ```bash
-zig fetch --save git+https://github.com/ItsMeSamey/dotenv_zig#main
+zig fetch --save git+https://github.com/ItsMeSamey/zig_dotenv#main
 ```
 
 Then, add it to your `build.zig`:
