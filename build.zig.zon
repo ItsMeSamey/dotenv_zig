@@ -7,7 +7,9 @@
   .paths = .{
     "build.zig",
     "build.zig.zon",
-    "src/dotenv.zig",
+    "dotenv.zig",
+    "readme.md",
+    "LICENSE",
   },
 }
 
